@@ -48,7 +48,7 @@ export function importCSV(text) {
 
 export function importFIT(buffer) { return mergeRuns([parseFit(buffer)], 'fit'); }
 
-function mergeRuns(list, source) {
+export function mergeRuns(list, source) {
   let added = 0, updated = 0, skipped = 0;
   for (const r of list) {
     if (!r.distKm && !r.timeSec) { skipped++; continue; }
@@ -57,11 +57,12 @@ function mergeRuns(list, source) {
     const dup = state.runs.find((x) => x.date.slice(0, 10) === day && x.type.includes('Cycling') === r.type.includes('Cycling') &&
       (x.distKm && r.distKm ? Math.abs(x.distKm - r.distKm) / r.distKm < 0.15 : Math.abs((x.timeSec || 0) - (r.timeSec || 0)) < 300));
     if (dup) {
-      const rank = { manual: 0, csv: 1, fit: 2 };
+      const rank = { manual: 0, csv: 1, strava: 2, fit: 3 };
       if (rank[source] >= rank[dup.source]) {
         const keep = { id: dup.id, wt: dup.wt, slotId: dup.slotId, note: dup.note };
         if (source === 'csv' && dup.source === 'fit') { skipped++; continue; }
-        Object.assign(dup, r, keep, source === 'csv' && dup.laps ? { laps: dup.laps, hrSamples: dup.hrSamples } : {});
+        if (source === dup.source && source === 'strava' && dup.stravaId === r.stravaId && !r.laps && dup.laps) { r.laps = dup.laps; r.hrSamples = dup.hrSamples; }
+        Object.assign(dup, r, keep, (source === 'csv' || source === 'strava') && dup.laps && !r.laps ? { laps: dup.laps, hrSamples: dup.hrSamples } : {});
         updated++;
       } else skipped++;
     } else {

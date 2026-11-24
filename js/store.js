@@ -85,13 +85,15 @@ export function defaultState() {
   return {
     v: 1,
     goal: { type: 'hybrid', runFocus: '10k', targetTime: '', targetDate: '', note: '', set: false },
-    settings: { hrMax: null, hrMaxAuto: true, hrRest: 55, vdotOverride: null, bodyWeight: null, deloadUntil: null, sound: true },
+    settings: { hrMax: null, hrMaxAuto: true, hrRest: 55, vdotOverride: null, bodyWeight: null, deloadUntil: null, sound: true, barKg: 20, slotTime: '18:00', reminder: 60,
+      aiKey: '', aiModel: 'gemini-2.5-flash', strava: { clientId: '', clientSecret: '', refresh: '', access: '', expires: 0, athlete: '', lastSync: 0, error: '' } },
     templates: defaultTemplates(),
     sessions: [],   // zalogowane treningi siłowe / mobility
     runs: [],       // biegi i cardio (CSV / FIT / ręcznie)
     plan: [],       // zaplanowane sloty {id,date,minutes,override,energy,status,doneType,doneRef}
     bodyweight: [], // {date, kg}
     active: null,   // trwający trening
+    chat: [],       // rozmowa z asystentem AI
   };
 }
 
@@ -109,6 +111,7 @@ function migrate(s) {
   for (const k of Object.keys(d)) if (s[k] === undefined) s[k] = d[k];
   s.goal = { ...d.goal, ...s.goal };
   s.settings = { ...d.settings, ...s.settings };
+  s.settings.strava = { ...d.settings.strava, ...(s.settings.strava || {}) };
   return s;
 }
 export function save() {
@@ -121,3 +124,45 @@ export function tpl(id) { return state.templates.find((t) => t.id === id); }
 export async function requestPersist() {
   try { if (navigator.storage?.persist) await navigator.storage.persist(); } catch (e) { /* ignore */ }
 }
+
+// Sekrety nie trafiają do kopii zapasowej
+export function exportable() {
+  const copy = JSON.parse(JSON.stringify(state));
+  copy.settings.aiKey = '';
+  copy.settings.strava = { ...copy.settings.strava, clientSecret: '', refresh: '', access: '', expires: 0 };
+  return copy;
+}
+export function importBackup(data) {
+  const keep = { aiKey: state.settings.aiKey, strava: state.settings.strava };
+  replaceState(data);
+  if (!state.settings.aiKey) state.settings.aiKey = keep.aiKey;
+  if (!state.settings.strava.refresh) state.settings.strava = keep.strava;
+  save();
+}
+
+// Zamienniki ćwiczeń (klucz: nazwa małymi literami)
+export const SUBS = {
+  'wyciskanie hantli na skosie dodatnim (30°)': ['Wyciskanie sztangi na skosie dodatnim', 'Wyciskanie na maszynie Smitha (skos)', 'Wyciskanie na maszynie hammer (skos)'],
+  'podciąganie na drążku z dociążeniem': ['Podciąganie bez obciążenia (wolna ekscentryka)', 'Ściąganie drążka wyciągu górnego do klatki', 'Podciąganie z gumą'],
+  'rozpiętki na bramie z dolnego wyciągu (low-to-high)': ['Rozpiętki z hantlami na skosie dodatnim', 'Pec deck'],
+  'wiosłowanie hantlem jednorącz w oparciu o ławkę': ['Wiosłowanie na wyciągu jednorącz', 'Wiosłowanie na maszynie (chest-supported)', 'Wiosłowanie sztangą w opadzie'],
+  'wznosy bokiem na wyciągu (cable lateral raises)': ['Wznosy bokiem z hantlami', 'Wznosy bokiem na maszynie'],
+  'face pulls do czoła z rotacją zewn.': ['Odwrotne rozpiętki na bramie (Rear Delt Fly)', 'Odwrotne rozpiętki z hantlami w opadzie', 'Reverse pec deck'],
+  'uginanie przedramion z supinacją na ławce skośnej': ['Uginanie na modlitewniku', 'Uginanie na wyciągu dolnym', 'Uginanie z hantlami stojąc'],
+  'prostowanie ramion na wyciągu z linką': ['Prostowanie ramion nad głową na wyciągu', 'Prostowanie na wyciągu drążkiem prostym'],
+  'wiszące unoszenie nóg do drążka': ['Unoszenie kolan w podporze (captain\'s chair)', 'Odwrotne brzuszki na ławce', 'Ab-Wheel'],
+  'dipsy na poręczach z dociążeniem': ['Wyciskanie hantli na ławce płaskiej', 'Dipsy na maszynie', 'Pompki z obciążeniem'],
+  'ściąganie drążka wyciągu górnego do klatki': ['Podciąganie chwytem neutralnym', 'Ściąganie jednorącz na wyciągu', 'Pullover na wyciągu'],
+  'rozpiętki na bramie w siadzie (seated cable fly)': ['Pec deck', 'Rozpiętki z hantlami na ławce płaskiej'],
+  'wiosłowanie na wyciągu dolnym (seated cable row)': ['Wiosłowanie na maszynie (chest-supported)', 'Wiosłowanie hantlem jednorącz w oparciu o ławkę'],
+  'wznosy bokiem z hantlami': ['Wznosy bokiem na wyciągu (Cable Lateral Raises)', 'Wznosy bokiem na maszynie'],
+  'odwrotne rozpiętki na bramie (rear delt fly)': ['Face Pulls do czoła z rotacją zewn.', 'Reverse pec deck'],
+  'uginanie przedramion ze sztangą łamaną stojąc': ['Uginanie z hantlami stojąc', 'Uginanie na wyciągu dolnym'],
+  'wyciskanie francuskie ze sztangą leżąc (skullcrushers)': ['Wyciskanie francuskie hantlami', 'Prostowanie ramion nad głową na wyciągu', 'Prostowanie ramion na wyciągu z linką'],
+  'allahy na wyciągu klęcząc (cable crunches)': ['Ab-Wheel', 'Wiszące unoszenie nóg do drążka'],
+  'cossack squat': ['Wykroki boczne z hantlami', 'Bułgarskie przysiady (lekko)'],
+  'rdl jednonóż': ['RDL z hantlami (obunóż)', 'Hip thrust', 'Uginanie nóg na maszynie'],
+  'wyprosty na ławce rzymskiej': ['Reverse hyper', 'Good morning z lekką sztangą', 'Bird-dog'],
+  'wspięcia na łydki': ['Wspięcia na łydki na suwnicy', 'Wspięcia jednonóż ze schodka'],
+  'brzuch (pallof press / dead bug)': ['Dead bug', 'Plank boczny', 'Ab-Wheel'],
+};

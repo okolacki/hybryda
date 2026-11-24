@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Hybryda – Strava</title>
+  <meta name="theme-color" content="#0e1013">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="main" id="box">
+    <header class="top"><div><div class="eyebrow">Strava</div><h1>Łączenie konta…</h1></div></header>
+  </main>
+  <script type="module">
+    const box = document.getElementById('box');
+    const q = new URLSearchParams(location.search);
+    const code = q.get('code'), err = q.get('error');
+    const show = (title, html) => { box.innerHTML = `<header class="top"><div><div class="eyebrow">Strava</div><h1>${title}</h1></div></header>${html}`; };
+    if (err || !code) {
+      show('Nie połączono', `<div class="card"><p>Strava zwróciła: ${err || 'brak kodu'}. Wróć do aplikacji i spróbuj ponownie.</p><a class="btn primary" href="./">Wróć do aplikacji</a></div>`);
+    } else {
+      let done = false;
+      try {
+        const raw = JSON.parse(localStorage.getItem('hybryda-tracker-v1') || 'null');
+        if (raw?.settings?.strava?.clientId && raw.settings.strava.clientSecret) {
+          const { exchangeCode } = await import('./js/strava.js');
+          await exchangeCode(code);
+          done = true;
+          location.replace('./?strava=ok');
+        }
+      } catch (e) { console.warn(e); }
+      if (!done) {
+        show('Skopiuj kod', `<div class="card"><p>Ta strona otworzyła się poza aplikacją, więc nie widzi jej ustawień. Skopiuj kod i wklej go w aplikacji: <b>Bieganie → Strava → Wklej kod</b>.</p>
+          <input id="c" readonly value="${code.replace(/[^\w-]/g, '')}" style="width:100%;font-size:16px;padding:12px;border-radius:10px;border:1px solid var(--line);background:var(--s2);margin:10px 0">
+          <button class="btn primary" id="cp">Kopiuj kod</button></div>`);
+        document.getElementById('cp').onclick = async () => {
+          const el = document.getElementById('c');
+          try { await navigator.clipboard.writeText(el.value); } catch (e) { el.select(); document.execCommand('copy'); }
+          document.getElementById('cp').textContent = 'Skopiowano ✓';
+        };
+      }
+    }
+  </script>
+</body>
+</html>

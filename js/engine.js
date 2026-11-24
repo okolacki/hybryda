@@ -1,5 +1,5 @@
 // Silnik: dobór treningu do slotu, progresja siłowa, porady, optymalizacja planu
-import { state, MUSCLES, MUSCLE_RANGE } from './store.js';
+import { state, MUSCLES, MUSCLE_RANGE, SUBS } from './store.js';
 import { today, addDays, weekStart, diffDays, normKey, round, clamp, fmtKg, fmtNum, dayIdx, DAYS } from './util.js';
 import { classify, isRun, RUN_TYPES, runStats, buildRun, hrMax, estimateVdot } from './running.js';
 
@@ -266,18 +266,24 @@ export function prescribe(ex) {
   const range = `${ex.repMin}–${ex.repMax}`;
   if (!h.length) return { w: null, reps: ex.repMax, sets, text: `${range} powt.`, why: 'Pierwszy raz – dobierz ciężar tak, by zostały 1–2 powtórzenia w zapasie.', last: null };
   const last = h[0];
-  const lastTxt = last.sets.map((x) => (x.w ? `${fmtKg(x.w)}×${x.r}` : `${x.r}`)).join(', ');
+  const lastTxt = last.sets.map((x) => (x.w ? `${fmtKg(x.w)}×${x.r}` : `${x.r}`) + (x.rir != null ? ` @${x.rir}` : '')).join(', ');
   const W = Math.max(...last.sets.map((x) => x.w || 0));
   const atW = last.sets.filter((x) => (x.w || 0) === W);
   const inc = ex.inc || 0;
+  const rirs = atW.map((x) => x.rir).filter((x) => x != null);
+  const avgRir = rirs.length ? rirs.reduce((a, b) => a + b, 0) / rirs.length : null;
   let w = W, reps = ex.repMin, why;
   if (!inc || (!W && ex.equip === 'bw')) {
     const best = Math.max(...last.sets.map((x) => x.r));
     reps = Math.min(best + 1, ex.repMax + 5);
     why = best >= ex.repMax ? 'Górny zakres osiągnięty – dodaj obciążenie lub wolniejsze tempo (3 s ekscentryka).' : 'Dąż do +1 powtórzenia względem ostatniej sesji.';
   } else if (atW.length >= ex.sets && atW.every((x) => x.r >= ex.repMax)) {
+    const big = avgRir != null && avgRir >= 3;
+    w = W + inc * (big ? 2 : 1); reps = ex.repMin;
+    why = `Wszystkie serie w górnym zakresie (${ex.repMax})${big ? ` i duży zapas (RIR ~${fmtNum(avgRir, 0)})` : ''} → +${fmtKg(inc * (big ? 2 : 1))} kg.`;
+  } else if (avgRir != null && avgRir >= 3 && Math.min(...atW.map((x) => x.r)) >= ex.repMin) {
     w = W + inc; reps = ex.repMin;
-    why = `Wszystkie serie w górnym zakresie (${ex.repMax}) → +${fmtKg(inc)} kg.`;
+    why = `Duży zapas powtórzeń (RIR ~${fmtNum(avgRir, 0)}) – ciężar był za lekki → +${fmtKg(inc)} kg.`;
   } else if (Math.max(...atW.map((x) => x.r)) < ex.repMin) {
     const prevFail = h[1] && Math.max(...h[1].sets.map((x) => x.r)) < ex.repMin;
     if (prevFail) { w = Math.max(0, round(W * 0.92, inc >= 2 ? 1 : 0.5)); why = 'Dwie sesje poniżej zakresu → zmniejsz ciężar o ~8% i odbuduj.'; }
@@ -290,6 +296,38 @@ export function prescribe(ex) {
   }
   if (deload) { w = W ? round(W * 0.9, 0.5) : w; why = 'Deload: −1 seria, ~90% ciężaru, 3–4 powtórzenia w zapasie.'; }
   return { w, reps, sets, text: `${w ? fmtKg(w) + ' kg × ' : ''}${range}`, why, last: { date: last.date, txt: lastTxt } };
+}
+
+// Serie rozgrzewkowe dla ćwiczeń kluczowych
+export function warmups(it) {
+  const W = +it.presc?.w;
+  if (!W || it.unit !== 'reps' || it.equip === 'bw' || it.prio !== 1) return null;
+  const step = it.inc >= 2.5 ? 2.5 : it.inc || 1;
+  if (it.equip === 'bw+') return `bez obciążenia × 5${W >= 10 ? ` · +${fmtKg(round(W * 0.5, step))} kg × 3` : ''}`;
+  const plan = W < 15 ? [[0.6, 6]] : [[0.5, 8], [0.7, 4], [0.85, 2]];
+  const out = []; let prev = 0;
+  for (const [p, r] of plan) { const w = round(W * p, step); if (w > prev && w < W) { out.push(`${fmtKg(w)} × ${r}`); prev = w; } }
+  return out.length ? out.join(' · ') : null;
+}
+
+// Talerze na stronę sztangi
+export function plates(total, bar = 20) {
+  let side = (total - bar) / 2;
+  if (side < 0) return null;
+  const out = [];
+  for (const p of [25, 20, 15, 10, 5, 2.5, 1.25]) while (side >= p - 1e-9) { out.push(p); side -= p; }
+  return { plates: out, rest: Math.round(side * 2 * 100) / 100 };
+}
+
+// Zamienniki: lista zdefiniowana + ćwiczenia z planu na tę samą partię
+export function alternatives(name, muscles = {}) {
+  const key = normKey(name);
+  const list = [...(SUBS[key] || [])];
+  const main = Object.entries(muscles).sort((a, b) => b[1] - a[1])[0]?.[0];
+  if (main) for (const t of state.templates) for (const e of t.exercises) {
+    if (normKey(e.name) !== key && e.muscles?.[main] === 1 && !list.includes(e.name)) list.push(e.name);
+  }
+  return list;
 }
 
 export function stalled(name, equip) {

@@ -1,6 +1,10 @@
-import { state, save, tpl, replaceState, resetState, MUSCLES, MUSCLE_RANGE, EQUIP, requestPersist } from './store.js';
+import { state, save, tpl, replaceState, resetState, MUSCLES, MUSCLE_RANGE, EQUIP, requestPersist, exportable, importBackup } from './store.js';
 import { uid, esc, today, weekStart, weekDays, addDays, isoWeek, fmtDate, fmtDateLong, DAYS, dayIdx, fmtDur, fmtMin, fmtPace, fmtKg, fmtNum, parseTime, num, normKey, diffDays, clamp } from './util.js';
-import { GOALS, FOCUS, CAT_LABEL, assignWeek, weekSummary, buildWorkout, candidates, candByKey, fitTemplate, prescribe, history, e1rm, prsInSession, muscleSets, tips, planSuggestions, applySuggestion, bodyWeight } from './engine.js';
+import { GOALS, FOCUS, CAT_LABEL, assignWeek, weekSummary, buildWorkout, candidates, candByKey, fitTemplate, prescribe, history, e1rm, prsInSession, muscleSets, tips, planSuggestions, applySuggestion, bodyWeight, warmups, plates, alternatives } from './engine.js';
+import { upcomingEvents, buildICS } from './ics.js';
+import { weekReport } from './report.js';
+import { ask, listModels, md, QUICK } from './ai.js';
+import * as strava from './strava.js';
 import { importCSV, importFIT, vdotFrom, estimateVdot, paces, predict, runStats, weeklyKm, efficiencySeries, classify, RUN_TYPES, isRun, runPace, hrZones, zoneTimes, buildRun, addManualRun, hrMax, autoHrMax } from './running.js';
 import { bars, line } from './charts.js';
 
@@ -14,6 +18,10 @@ const ui = {
   progEx: null,
   timer: null,
   showAllTips: false,
+  aiBusy: false,
+  aiErr: '',
+  models: null,
+  syncing: '',
 };
 const app = document.getElementById('app');
 
@@ -24,6 +32,8 @@ const I = {
   run: '<path d="M13 4.5a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0M8 21l3-6 3 2v5M6 12l3-4 4 1 3 3 3 1M11 15l-1-5"/>',
   progress: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   more: '<path d="M5 12h.01M12 12h.01M19 12h.01"/>',
+  coach: '<path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9zM19 15l.7 1.8 1.8.7-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7z"/>',
+  send: '<path d="M5 12h14M13 6l6 6-6 6"/>', cal: '<path d="M4 6h16v14H4zM4 10h16M8 3v4M16 3v4"/>', report: '<path d="M6 20V12M12 20V5M18 20v-9"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   left: '<path d="M15 18l-6-6 6-6"/>', right: '<path d="M9 18l6-6-6-6"/>',
   check: '<path d="M5 12l5 5L20 7"/>', x: '<path d="M6 6l12 12M18 6L6 18"/>',
@@ -44,12 +54,13 @@ const RUN_CAT_CLASS = { runE: 'c-run', runQ: 'c-run', runL: 'c-run', cardio: 'c-
 
 // ---------- render ----------
 function render() {
-  const tabs = [['week', 'Tydzień'], ['workout', 'Trening'], ['run', 'Bieganie'], ['progress', 'Postęp'], ['more', 'Więcej']];
+  const tabs = [['week', 'Tydzień'], ['workout', 'Trening'], ['run', 'Bieg'], ['coach', 'Asystent'], ['progress', 'Postęp'], ['more', 'Więcej']];
   let main = '';
   if (ui.tab === 'week') main = viewWeek();
   else if (ui.tab === 'workout') main = viewWorkout();
   else if (ui.tab === 'run') main = viewRun();
   else if (ui.tab === 'progress') main = viewProgress();
+  else if (ui.tab === 'coach') main = viewCoach();
   else main = viewMore();
   app.innerHTML = `
     <main class="main">${main}</main>
@@ -93,11 +104,23 @@ function viewWeek() {
     <div class="goalline"><b>${esc(g.label)}</b>${state.goal.runFocus && state.goal.runFocus !== 'none' ? `<span class="chip">${FOCUS[state.goal.runFocus]}${state.goal.targetTime ? ' · ' + esc(state.goal.targetTime) : ''}</span>` : ''}</div>
     <div class="pills">${pills}<div class="pill km"><span>Bieg</span><b>${fmtNum(sum.km)} km</b></div></div>
   </section>
+  <div class="row gap wrap">
+    <button class="btn sm ghost" data-a="report" data-v="${ws}">${ic('report')} Raport tygodnia</button>
+    <button class="btn sm ghost" data-a="calendar">${ic('cal')} Do kalendarza</button>
+  </div>
+  ${isCur && dayIdx(t0) <= 2 ? prevReportCard(addDays(ws, -7)) : ''}
   ${shownTips.length ? `<section class="tips">${shownTips.map(tipCard).join('')}${tipList.length > 2 ? `<button class="link" data-a="toggleTips">${ui.showAllTips ? 'Pokaż mniej' : `Pokaż wszystkie porady (${tipList.length})`}</button>` : ''}</section>` : ''}
   ${!state.plan.some((p) => p.date >= ws && p.date <= addDays(ws, 6)) ? `<div class="hint">Dodaj dzień, w którym możesz trenować (<b>+</b> przy dniu), podaj ile masz czasu – aplikacja dobierze trening do celu, regeneracji i tego, co już zrobiłeś w tym tygodniu.</div>` : ''}
   <section class="days">
     ${days.map((d) => dayBlock(d, asg, t0)).join('')}
   </section>`;
+}
+
+function prevReportCard(pws) {
+  const r = weekReport(pws);
+  if (!r.sessions.length && !r.runs.length) return '';
+  return `<button class="reportcard" data-a="report" data-v="${pws}"><div><div class="eyebrow">Raport · tydzień ${isoWeek(pws)}</div>
+    <b>${Math.round(r.adherence * 100)}% celu</b><small>${r.sessions.length} siłowe · ${r.rr.length} biegi · ${fmtNum(r.km)} km${r.prs.length ? ` · ${r.prs.length} PR` : ''}</small></div>${ic('right')}</button>`;
 }
 
 function tipCard(t) {
@@ -152,7 +175,7 @@ function slotCard(p, a, d) {
   const energy = ['', '😫', '😕', '🙂', '💪', '🔥'][p.energy || 0] || '';
   const isToday = d === today();
   return `<div class="slot ${catClass(c.cats)} ${isToday ? 'hot' : ''}">
-    <div class="row between slotmeta"><span class="tag">${ic('timer')} ${p.minutes} min${energy ? ' · ' + energy : ''}</span><span class="tag ${a.pinned ? 'pin' : 'auto'}">${a.pinned ? 'Twój wybór' : 'Sugestia'}</span></div>
+    <div class="row between slotmeta"><span class="tag">${ic('timer')} ${p.time || state.settings.slotTime} · ${p.minutes} min${energy ? ' · ' + energy : ''}</span><span class="tag ${a.pinned ? 'pin' : 'auto'}">${a.pinned ? 'Twój wybór' : 'Sugestia'}</span></div>
     <h3>${esc(c.label)}</h3>
     <p class="sub">${sub} <span class="muted">· ~${w.kind === 'run' ? w.run.estMin : w.est} min</span></p>
     ${a.reasons?.length ? `<ul class="why">${a.reasons.slice(0, 3).map((r) => `<li class="${r.p >= 0 ? 'pos' : 'neg'}">${esc(r.t)}</li>`).join('')}</ul>` : ''}
@@ -216,17 +239,19 @@ function exerciseCard(it, i) {
       <button class="iconbtn sm" data-a="exMenu" data-v="${i}" aria-label="Opcje ćwiczenia">${ic('dots')}</button>
     </div>
     ${p.why ? `<p class="why1">${esc(p.why)}</p>` : ''}
+    ${(() => { const wu = warmups(it); return wu ? `<p class="warm">Rozgrzewka: ${esc(wu)}</p>` : ''; })()}
     ${it.note ? `<p class="note">${esc(it.note)}</p>` : ''}
     <div class="sets">
-      <div class="sethead"><span>#</span><span>${noWeight ? '' : it.equip === 'bw+' ? '+kg' : 'kg'}</span><span>${unit}</span><span></span></div>
+      <div class="sethead"><span>#</span><span>${noWeight ? '' : it.equip === 'bw+' ? '+kg' : 'kg'}</span><span>${unit}</span><span>RIR</span><span></span></div>
       ${it.sets.map((s, j) => `<div class="setrow ${s.done ? 'done' : ''}">
         <span class="n">${j + 1}</span>
         ${noWeight ? '<span></span>' : `<input inputmode="decimal" data-in="w" data-i="${i}" data-j="${j}" value="${s.w ?? ''}" placeholder="${p.w ?? '–'}">`}
         <input inputmode="numeric" data-in="r" data-i="${i}" data-j="${j}" value="${s.r ?? ''}" placeholder="${p.reps ?? it.repMax}">
+        <button class="rir ${s.rir != null ? 'on' : ''}" data-a="rir" data-i="${i}" data-j="${j}" aria-label="Powtórzenia w zapasie">${s.rir ?? '–'}</button>
         <button class="check ${s.done ? 'on' : ''}" data-a="setDone" data-i="${i}" data-j="${j}" aria-label="Seria zrobiona">${ic('check')}</button>
       </div>`).join('')}
     </div>
-    <div class="row gap setbtns"><button class="btn sm ghost" data-a="addSet" data-v="${i}">+ seria</button><button class="btn sm ghost" data-a="delSet" data-v="${i}" ${it.sets.length <= 1 ? 'disabled' : ''}>− seria</button><span class="muted rest">przerwa ${it.rest}s</span></div>
+    <div class="row gap setbtns"><button class="btn sm ghost" data-a="addSet" data-v="${i}">+ seria</button><button class="btn sm ghost" data-a="delSet" data-v="${i}" ${it.sets.length <= 1 ? 'disabled' : ''}>− seria</button>${it.equip === 'bb' ? `<button class="btn sm ghost" data-a="plates" data-v="${i}">Talerze</button>` : ''}<span class="muted rest">przerwa ${it.rest}s</span></div>
   </div>`;
 }
 
@@ -282,6 +307,7 @@ function viewRun() {
       : `<p>Zaimportuj biegi (CSV z Garmin Connect: Aktywności → Eksportuj CSV, albo pliki .FIT), aby wyliczyć tempa.</p><button class="btn primary" data-a="import">Importuj pliki</button>`}
   </section>
   ${est.vdot ? `<section class="card"><h2>Twoje tempa treningowe</h2>${paceTbl}<p class="muted small">Tempa przeliczają się automatycznie po każdym imporcie. Tętno wg HRmax ${hrMax()} bpm.</p></section>` : ''}
+  ${stravaCard()}
   <section class="card"><h2>Kilometraż tygodniowy</h2>${bars(wk, { fmt: (v) => Math.round(v) })}
     <div class="stats4">
       <div class="stat"><small>Śr. 4 tyg.</small><b>${fmtNum(st.avg4)} km</b></div>
@@ -457,6 +483,116 @@ function viewInstall() {
   <p class="muted small">Dane zapisują się lokalnie w aplikacji na ekranie początkowym (oddzielnie od karty Safari). Eksportuj kopię JSON przed zmianą telefonu.</p></section>`;
 }
 
+function exAlts(it) {
+  const [, e] = findTplEx(it.exId);
+  const set = new Set([...(e?.alts || []), ...(it.origName ? [it.origName] : []), ...alternatives(it.origName || it.name, it.muscles || {}), ...alternatives(it.name, it.muscles || {})]);
+  set.delete(it.name);
+  return [...set].slice(0, 8);
+}
+
+function stravaCard() {
+  const s = state.settings.strava;
+  if (strava.connected()) {
+    return `<section class="card strava"><div class="row between gap"><div><h2>Strava</h2><small>Połączono${s.athlete ? ' jako ' + esc(s.athlete) : ''} · ${s.lastSync ? 'synchr. ' + new Date(s.lastSync).toLocaleString('pl-PL', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'jeszcze nie synchronizowano'}</small></div>
+      <button class="btn sm primary" data-a="stravaSync" ${ui.syncing ? 'disabled' : ''}>${ui.syncing ? 'Trwa…' : 'Synchronizuj'}</button></div>
+      <p class="muted small" id="syncMsg">${ui.syncing ? esc(ui.syncing) : 'Garmin wysyła treningi do Stravy automatycznie, a aplikacja pobiera je przy starcie (co 30 min) lub po stuknięciu „Synchronizuj”.'}</p>
+      ${s.error ? `<p class="small bad">${esc(s.error)}</p>` : ''}
+      <button class="link" data-a="stravaDisconnect">Rozłącz</button></section>`;
+  }
+  const host = location.host || 'okolacki.github.io';
+  return `<section class="card strava"><h2>Automatyczny import ze Stravy</h2>
+    <ol class="steps small">
+      <li>Połącz Garmin Connect ze Stravą (Garmin Connect → Ustawienia → Aplikacje partnerskie), jeśli jeszcze nie jest.</li>
+      <li>Na <b>strava.com/settings/api</b> utwórz aplikację: Category <i>Training</i>, Website <code>${esc(location.origin + location.pathname)}</code>, Authorization Callback Domain <code>${esc(host)}</code>.</li>
+      <li>Wpisz poniżej <b>Client ID</b> i <b>Client Secret</b> i stuknij „Połącz”.</li>
+    </ol>
+    <div class="grid2"><label class="field"><span>Client ID</span><input inputmode="numeric" data-in="stvId" value="${esc(s.clientId)}"></label>
+    <label class="field"><span>Client Secret</span><input type="password" data-in="stvSecret" value="${esc(s.clientSecret)}" autocomplete="off"></label></div>
+    <button class="btn primary" data-a="stravaConnect" ${s.clientId && s.clientSecret ? '' : 'disabled'}>Połącz ze Stravą</button>
+    <details class="small mt"><summary>Strava pokazała kod poza aplikacją?</summary>
+      <div class="row gap mt"><input class="grow txt" id="stvCode" placeholder="Wklej kod"><button class="btn sm" data-a="stravaCode">Zatwierdź</button></div></details>
+    ${s.error ? `<p class="small bad">${esc(s.error)}</p>` : ''}
+    <p class="muted small">Sekret zostaje tylko na tym telefonie (nie trafia do kopii zapasowej).</p></section>`;
+}
+
+function viewCoach() {
+  if (!state.settings.aiKey) {
+    return `<header class="top"><div><div class="eyebrow">Google Gemini</div><h1>Asystent</h1></div></header>
+    <section class="card"><h2>Podłącz Gemini z Google AI Studio</h2>
+      <ol class="steps small">
+        <li>Wejdź na <b>aistudio.google.com/apikey</b> i zaloguj się kontem Google.</li>
+        <li>Stuknij <b>Create API key</b> i skopiuj klucz.</li>
+        <li>Wklej go poniżej i zapisz.</li>
+      </ol>
+      <label class="field"><span>Klucz API</span><input type="password" id="aiKeyIn" placeholder="AIza…" autocomplete="off"></label>
+      <button class="btn primary" data-a="aiSaveKey">Zapisz i sprawdź</button>
+      ${ui.aiErr ? `<p class="small bad">${esc(ui.aiErr)}</p>` : ''}
+    </section>
+    <section class="card"><h2>Bezpieczeństwo i prywatność</h2><ul class="notes small">
+      <li>Klucz zostaje tylko na tym telefonie i nie trafia do eksportu JSON.</li>
+      <li>Przy każdym pytaniu do Google wysyłane jest podsumowanie Twoich treningów (cel, plan, historia serii, biegi).</li>
+      <li>Zalecane: w Google Cloud Console → Credentials ogranicz klucz do <i>Generative Language API</i> i witryny <code>${esc(location.host || 'okolacki.github.io')}/*</code>.</li>
+      <li>W darmowym planie AI Studio obowiązują limity zapytań, a Google może wykorzystywać treści do ulepszania usług.</li>
+    </ul></section>`;
+  }
+  const chat = state.chat;
+  return `<header class="top"><div><div class="eyebrow">Gemini · ${esc(state.settings.aiModel)}</div><h1>Asystent</h1></div>
+    <button class="iconbtn" data-a="aiSettings" aria-label="Ustawienia asystenta">${ic('dots')}</button></header>
+  ${chat.length ? '' : `<div class="hint">Asystent widzi Twój cel, plan, historię serii, biegi, VDOT i bieżący tydzień. Zapytaj o cokolwiek albo zacznij od gotowego pytania.</div>`}
+  <div class="chat">${chat.map((m) => `<div class="bubble ${m.role === 'user' ? 'me' : 'ai'} ${m.err ? 'err' : ''}" ${m.pending ? 'id="aiStream"' : ''}>${m.role === 'user' ? esc(m.text).replace(/\n/g, '<br>') : m.pending && !m.text ? '<span class="typing"><i></i><i></i><i></i></span>' : md(m.text)}</div>`).join('')}</div>
+  <div class="quick">${QUICK.map(([l], i) => `<button class="chipbtn" data-a="aiQuick" data-v="${i}" ${ui.aiBusy ? 'disabled' : ''}>${l}</button>`).join('')}</div>
+  <div class="composer"><textarea id="aiIn" rows="2" placeholder="Zapytaj trenera…" ${ui.aiBusy ? 'disabled' : ''}></textarea>
+    <button class="iconbtn send" data-a="aiSend" ${ui.aiBusy ? 'disabled' : ''} aria-label="Wyślij">${ic('send')}</button></div>`;
+}
+
+async function aiSend(text) {
+  text = (text || '').trim();
+  if (!text || ui.aiBusy) return;
+  if (!state.settings.aiKey) { actions.tab('coach'); return; }
+  const past = state.chat.filter((m) => !m.err && !m.pending && m.text);
+  state.chat.push({ role: 'user', text, at: Date.now() });
+  const reply = { role: 'model', text: '', pending: true, at: Date.now() };
+  state.chat.push(reply);
+  ui.aiBusy = true; ui.tab = 'coach'; ui.sheet = null;
+  render(); scrollChat();
+  try {
+    reply.text = await ask([...past, { role: 'user', text }], (t) => {
+      reply.text = t;
+      const el = document.getElementById('aiStream');
+      if (el) { el.innerHTML = md(t); scrollChat(); }
+    });
+  } catch (e) {
+    reply.text = '⚠️ ' + (e.message || e); reply.err = true;
+    state.chat[state.chat.length - 2].err = true;
+  }
+  reply.pending = false; ui.aiBusy = false;
+  if (state.chat.length > 40) state.chat = state.chat.slice(-40);
+  save(); render(); scrollChat();
+}
+function scrollChat() { requestAnimationFrame(() => window.scrollTo(0, document.body.scrollHeight)); }
+
+async function runStravaSync(silent = false) {
+  if (ui.syncing) return;
+  ui.syncing = 'Łączę ze Stravą…'; if (!silent) render();
+  try {
+    const r = await strava.sync({ onProgress: (m) => { ui.syncing = m; const el = document.getElementById('syncMsg'); if (el) el.textContent = m; } });
+    linkSlots(); save();
+    ui.syncing = '';
+    if (!silent) openSheet('msg', { title: 'Strava zsynchronizowana', text: `Pobrano ${r.fetched} aktywności: nowe ${r.added}, zaktualizowane ${r.updated}.` });
+    else render();
+  } catch (e) {
+    ui.syncing = ''; state.settings.strava.error = String(e.message || e); save();
+    if (!silent) openSheet('msg', { title: 'Błąd synchronizacji', text: state.settings.strava.error });
+    else render();
+  }
+}
+
+function downloadFile(content, name, type) {
+  const blob = new Blob([content], { type });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+}
+
 // ====================== ARKUSZE (modale) ======================
 function renderSheet() {
   const S = ui.sheet, F = ui.form;
@@ -464,7 +600,8 @@ function renderSheet() {
   if (S.type === 'slot') {
     const mins = [30, 45, 60, 75, 90, 105, 120];
     return `${head(S.slotId ? 'Edytuj slot' : 'Zaplanuj trening')}
-      <label class="field"><span>Dzień</span><input type="date" data-f="date" value="${F.date}"></label>
+      <div class="grid2"><label class="field"><span>Dzień</span><input type="date" data-f="date" value="${F.date}"></label>
+      <label class="field"><span>Godzina</span><input type="time" data-f="time" value="${F.time}"></label></div>
       <div class="field"><span>Ile masz czasu?</span><div class="chips">${mins.map((m) => `<button class="chipbtn ${+F.minutes === m ? 'on' : ''}" data-a="setf" data-k="minutes" data-v="${m}">${m}</button>`).join('')}<input class="mini" inputmode="numeric" data-f="minutes" value="${F.minutes}" aria-label="minuty"></div></div>
       <div class="field"><span>Samopoczucie (opcjonalnie)</span><div class="chips">${['😫', '😕', '🙂', '💪', '🔥'].map((e, i) => `<button class="chipbtn emo ${+F.energy === i + 1 ? 'on' : ''}" data-a="setf" data-k="energy" data-v="${+F.energy === i + 1 ? 0 : i + 1}">${e}</button>`).join('')}</div></div>
       <div class="row gap"><button class="btn primary grow" data-a="saveSlot">Zapisz</button>${S.slotId ? `<button class="btn danger" data-a="delSlot" data-v="${S.slotId}">Usuń</button>` : ''}</div>`;
@@ -538,6 +675,8 @@ function renderSheet() {
         <label class="field"><span>Przerwa s</span><input inputmode="numeric" data-f="rest" value="${F.rest}"></label>
       </div>
       <label class="toggle"><input type="checkbox" data-f="persist" ${F.persist ? 'checked' : ''}> Zapisz zmiany także w planie</label>
+      <div class="field"><span>Zamień ćwiczenie (zajęty sprzęt?)</span><div class="chips">${exAlts(it).map((n) => `<button class="chipbtn" data-a="swapEx" data-v="${esc(n)}">${esc(n)}</button>`).join('') || '<span class="muted small">Brak podpowiedzi – wpisz własne</span>'}</div>
+        <div class="row gap"><input class="grow" data-f="swapName" value="${esc(F.swapName || '')}" placeholder="Inne ćwiczenie…"><button class="btn sm" data-a="swapEx" data-v="">Zamień</button></div></div>
       <div class="row gap wrap"><button class="btn primary" data-a="saveExMenu">Zapisz</button><button class="btn" data-a="exMoveActive" data-d="-1">W górę</button><button class="btn" data-a="exMoveActive" data-d="1">W dół</button><button class="btn danger" data-a="removeActiveEx">Usuń z treningu</button></div>`;
   }
   if (S.type === 'addExercise') {
@@ -589,6 +728,53 @@ function renderSheet() {
   if (S.type === 'summary') {
     return `${head('Zapisano 💪')}<p>${esc(S.text)}</p>${S.prs.length ? `<div class="tip good"><div><b>Nowe rekordy</b><p>${S.prs.map((p) => `${esc(p.name)}: e1RM ${fmtNum(p.prev, 0)} → ${fmtNum(p.cur, 0)}`).join('<br>')}</p></div></div>` : ''}
       <button class="btn primary" data-a="closeSheet">OK</button>`;
+  }
+  if (S.type === 'plates') {
+    const w = num(F.w) || 0, bar = +F.bar || 20, res = plates(w, bar);
+    return `${head('Kalkulator talerzy')}
+      <div class="grid2"><label class="field"><span>Ciężar całkowity (kg)</span><input inputmode="decimal" data-f="w" value="${F.w}"></label>
+      <div class="field"><span>Gryf (kg)</span><div class="chips">${[20, 15, 10, 7].map((b) => `<button class="chipbtn ${bar === b ? 'on' : ''}" data-a="setf" data-k="bar" data-v="${b}">${b}</button>`).join('')}</div></div></div>
+      <button class="btn ghost sm" data-a="platesCalc">Przelicz</button>
+      ${res ? `<div class="field"><span>Na każdą stronę</span><div class="plates">${res.plates.map((x) => `<span class="plate">${fmtKg(x)}</span>`).join('') || '<span class="muted">sam gryf</span>'}</div>${res.rest ? `<p class="muted small">Nie da się złożyć dokładnie – brakuje ${fmtKg(res.rest)} kg.</p>` : ''}</div>` : '<p class="muted">Ciężar mniejszy niż gryf.</p>'}
+      <p class="muted small">Sztanga łamana zwykle waży 7–10 kg – sprawdź na swojej siłowni.</p>`;
+  }
+  if (S.type === 'report') {
+    const r = weekReport(S.ws);
+    const pct = Math.round(r.adherence * 100);
+    const dKm = r.ended && r.prevKm > 0 ? Math.round((r.km / r.prevKm - 1) * 100) : null;
+    return `${head(`Raport · tydzień ${isoWeek(S.ws)}`)}
+      <p class="muted small">${fmtDate(r.ws)} – ${fmtDate(r.we)}${r.ended ? '' : ' · tydzień w trakcie'}</p>
+      <div class="adh"><div class="ring" style="--p:${pct}"><b>${pct}%</b></div><div><b>Zgodność z celem</b><small>${esc(GOALS[state.goal.type]?.label || '')}</small><small>Sloty: ${r.done}/${r.slots} zrobione${r.missed ? ` · ${r.missed} przepadło` : ''}</small></div></div>
+      <div class="pills">${Object.entries(r.targets).filter(([, t]) => t >= 1).map(([k, t]) => { const d = r.counts[k] || 0; return `<div class="pill ${d >= t ? 'full' : ''}"><span>${CAT_LABEL[k]}</span><b>${fmtNum(d, d % 1 ? 1 : 0)}/${t}</b><i style="width:${Math.min(100, (d / t) * 100)}%"></i></div>`; }).join('')}</div>
+      <div class="stats4">
+        <div class="stat"><small>Siłownia</small><b>${r.sessions.length} · ${r.sets} serii</b></div>
+        <div class="stat"><small>Tonaż</small><b>${Math.round(r.tonnage)} kg</b></div>
+        <div class="stat"><small>Bieg${dKm != null ? ` (${dKm > 0 ? '+' : ''}${dKm}% t/t)` : ''}</small><b class="${dKm > 25 ? 'warnc' : ''}">${fmtNum(r.km)} km</b></div>
+        <div class="stat"><small>Biegi / akcenty</small><b>${r.rr.length} / ${r.quality}</b></div>
+        <div class="stat"><small>Najdłuższy</small><b>${fmtNum(r.longest)} km</b></div>
+        <div class="stat"><small>Czas treningu</small><b>${fmtMin(r.duration)}</b></div>
+      </div>
+      ${r.prs.length ? `<div class="tip good"><div><b>Rekordy</b><p>${r.prs.map((x) => `${esc(x.name)}: e1RM ${fmtNum(x.prev, 0)} → ${fmtNum(x.cur, 0)}`).join('<br>')}</p></div></div>` : ''}
+      <div class="field"><span>Wnioski</span><ul class="notes">${r.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></div>
+      <button class="btn primary" data-a="askReport" data-v="${S.ws}">${ic('coach')} Zapytaj asystenta o ten tydzień</button>`;
+  }
+  if (S.type === 'calendar') {
+    const ev = upcomingEvents(+F.weeks || 2);
+    const rem = state.settings.reminder;
+    return `${head('Eksport do kalendarza')}
+      <p class="muted small">Zaplanowane sloty trafią do Kalendarza iPhone'a z opisem treningu i przypomnieniem. Godzinę ustawiasz przy slocie.</p>
+      <div class="field"><span>Zakres</span><div class="chips">${[[1, 'Ten tydzień'], [2, '2 tygodnie'], [4, '4 tygodnie']].map(([k, l]) => `<button class="chipbtn ${(+F.weeks || 2) === k ? 'on' : ''}" data-a="setf" data-k="weeks" data-v="${k}">${l}</button>`).join('')}</div></div>
+      <div class="field"><span>Przypomnienie</span><div class="chips">${[[0, 'Bez'], [30, '30 min'], [60, '1 h'], [120, '2 h']].map(([k, l]) => `<button class="chipbtn ${rem === k ? 'on' : ''}" data-a="setReminder" data-v="${k}">${l}</button>`).join('')}</div></div>
+      ${ev.length ? `<div class="evlist">${ev.map((e) => `<div><b>${fmtDate(e.date)} ${e.time}</b><span>${esc(e.title)}</span></div>`).join('')}</div>` : '<div class="empty">Brak przyszłych slotów w tym zakresie – zaplanuj je w widoku tygodnia.</div>'}
+      ${ev.length ? `<button class="btn primary" data-a="icsOpen">Dodaj do Kalendarza</button><button class="btn ghost" data-a="icsShare">Udostępnij / zapisz plik .ics</button>
+      <p class="muted small">Ponowny eksport tych samych slotów może utworzyć duplikaty – po większych zmianach usuń stare wydarzenia.</p>` : ''}`;
+  }
+  if (S.type === 'aiSettings') {
+    return `${head('Ustawienia asystenta')}
+      <label class="field"><span>Model Gemini</span><select data-in="aiModel">${(ui.models || [{ id: state.settings.aiModel, label: state.settings.aiModel }]).map((m) => `<option value="${esc(m.id)}" ${m.id === state.settings.aiModel ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</select></label>
+      ${ui.models ? '' : '<p class="muted small">Ładuję listę modeli…</p>'}
+      <p class="muted small">„Flash” – szybki, wysokie limity w darmowym planie (dobry na co dzień). „Pro” – dokładniejsze analizy, niższe limity.</p>
+      <div class="row gap wrap"><button class="btn" data-a="aiClear">Wyczyść rozmowę</button><button class="btn danger" data-a="aiRemoveKey">Usuń klucz API</button></div>`;
   }
   if (S.type === 'msg') return `${head(esc(S.title))}<p>${esc(S.text)}</p><button class="btn primary" data-a="closeSheet">OK</button>`;
   return '';
@@ -650,7 +836,7 @@ function startWorkout({ tplId, slotId = null, addon = null, minutes = null }) {
 }
 function mkItem(e) {
   const p = prescribe(e);
-  return { exId: e.id, name: e.name, unit: e.unit, repMin: e.repMin, repMax: e.repMax, rest: e.rest, inc: e.inc, equip: e.equip, muscles: e.muscles, ss: e.ss, note: e.note, presc: p,
+  return { exId: e.id, prio: e.prio, alts: e.alts || [], name: e.name, unit: e.unit, repMin: e.repMin, repMax: e.repMax, rest: e.rest, inc: e.inc, equip: e.equip, muscles: e.muscles, ss: e.ss, note: e.note, presc: p,
     sets: Array.from({ length: p.sets }, () => ({ w: p.w ?? '', r: '', done: false })) };
 }
 function findTplEx(exId) { for (const t of state.templates) { const e = t.exercises.find((x) => x.id === exId); if (e) return [t, e]; } return []; }
@@ -689,12 +875,13 @@ const actions = {
   closeSheet,
   setf: (v, el) => { ui.form[el.dataset.k] = v; render(); },
 
-  addSlot: (d) => openSheet('slot', {}, { date: d, minutes: 60, energy: 0 }),
-  editSlot: (id) => { const p = state.plan.find((x) => x.id === id); openSheet('slot', { slotId: id }, { date: p.date, minutes: p.minutes, energy: p.energy || 0 }); },
+  addSlot: (d) => openSheet('slot', {}, { date: d, minutes: 60, energy: 0, time: state.settings.slotTime }),
+  editSlot: (id) => { const p = state.plan.find((x) => x.id === id); openSheet('slot', { slotId: id }, { date: p.date, minutes: p.minutes, energy: p.energy || 0, time: p.time || state.settings.slotTime }); },
   saveSlot: () => {
     const F = ui.form, m = clamp(parseInt(F.minutes, 10) || 60, 10, 300);
-    if (ui.sheet.slotId) { const p = state.plan.find((x) => x.id === ui.sheet.slotId); Object.assign(p, { date: F.date, minutes: m, energy: +F.energy || 0 }); }
-    else state.plan.push({ id: uid(), date: F.date, minutes: m, energy: +F.energy || 0, override: null, status: 'planned', created: Date.now() });
+    if (ui.sheet.slotId) { const p = state.plan.find((x) => x.id === ui.sheet.slotId); Object.assign(p, { date: F.date, minutes: m, energy: +F.energy || 0, time: F.time || null }); }
+    else state.plan.push({ id: uid(), date: F.date, minutes: m, energy: +F.energy || 0, time: F.time || null, override: null, status: 'planned', created: Date.now() });
+    if (F.time) state.settings.slotTime = F.time;
     save(); closeSheet();
   },
   delSlot: (id) => { state.plan = state.plan.filter((p) => p.id !== id); save(); closeSheet(); },
@@ -737,6 +924,74 @@ const actions = {
     }
     save(); render();
   },
+  rir: (_, el) => {
+    const s = state.active.items[+el.dataset.i].sets[+el.dataset.j];
+    const order = [null, 3, 2, 1, 0];
+    s.rir = order[(order.indexOf(s.rir ?? null) + 1) % order.length];
+    save(); render();
+  },
+  plates: (i) => { const it = state.active.items[+i]; const s = it.sets.find((x) => !x.done) || it.sets[0]; openSheet('plates', {}, { w: s?.w || it.presc?.w || '', bar: state.settings.barKg }); },
+  platesCalc: () => { state.settings.barKg = +ui.form.bar || 20; save(); render(); },
+  swapEx: (v) => {
+    const name = (v || ui.form.swapName || '').trim(); if (!name) return;
+    const it = state.active.items[ui.sheet.i];
+    if (!it.origName) it.origName = it.name;
+    const old = it.name;
+    it.name = name;
+    const eq = /sztang|smith/i.test(name) ? 'bb' : /hantl/i.test(name) ? 'db' : /wyciąg|bram|lin[kc]/i.test(name) ? 'cable' : /maszyn|pec deck|suwnic/i.test(name) ? 'machine' : null;
+    if (eq && eq !== it.equip) { it.equip = eq; it.inc = { bb: 2.5, db: 2, cable: 2.5, machine: 5 }[eq]; }
+    it.presc = prescribe({ ...it, sets: it.sets.length });
+    it.sets.forEach((x) => { if (!x.done) x.w = it.presc.w ?? ''; });
+    if (ui.form.persist) { const [, e] = findTplEx(it.exId); if (e) { e.alts = [...new Set([...(e.alts || []), old])].filter((x) => x !== name); e.name = name; } }
+    save(); closeSheet();
+  },
+  report: (ws) => openSheet('report', { ws }),
+  askReport: (ws) => aiSend(`Przeanalizuj mój tydzień ${fmtDate(ws)}–${fmtDate(addDays(ws, 6))}. Oceń wykonanie względem celu i podaj 3–5 konkretnych zaleceń na kolejny tydzień.`),
+  calendar: () => openSheet('calendar', {}, { weeks: 2 }),
+  setReminder: (v) => { state.settings.reminder = +v; save(); render(); },
+  icsOpen: () => {
+    const ics = buildICS(upcomingEvents(+ui.form.weeks || 2), state.settings.reminder);
+    const url = 'data:text/calendar;charset=utf-8,' + encodeURIComponent(ics);
+    const w = window.open(url, '_blank');
+    if (!w) location.href = url;
+  },
+  icsShare: async () => {
+    const ics = buildICS(upcomingEvents(+ui.form.weeks || 2), state.settings.reminder);
+    const file = new File([ics], 'hybryda-treningi.ics', { type: 'text/calendar' });
+    try { if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: 'Treningi' }); return; } } catch (e) { if (e.name === 'AbortError') return; }
+    downloadFile(ics, 'hybryda-treningi.ics', 'text/calendar');
+  },
+  aiSaveKey: async () => {
+    const key = document.getElementById('aiKeyIn').value.trim();
+    if (!key) return;
+    ui.aiErr = '';
+    try {
+      const models = await listModels(key);
+      ui.models = models;
+      state.settings.aiKey = key;
+      if (!models.some((m) => m.id === state.settings.aiModel)) state.settings.aiModel = (models.find((m) => /flash/.test(m.id) && !/lite|preview|exp/.test(m.id)) || models[0])?.id || state.settings.aiModel;
+      save();
+    } catch (e) { ui.aiErr = 'Klucz nie działa: ' + e.message; }
+    render();
+  },
+  aiSettings: async () => {
+    openSheet('aiSettings');
+    if (!ui.models) {
+      try { ui.models = await listModels(state.settings.aiKey); } catch (e) { ui.models = [{ id: state.settings.aiModel, label: state.settings.aiModel + ' (błąd listy: ' + e.message + ')' }]; }
+      if (ui.sheet?.type === 'aiSettings') render();
+    }
+  },
+  aiClear: () => { if (confirm('Wyczyścić rozmowę?')) { state.chat = []; save(); closeSheet(); } },
+  aiRemoveKey: () => { if (confirm('Usunąć klucz API z tego urządzenia?')) { state.settings.aiKey = ''; ui.models = null; save(); closeSheet(); } },
+  aiSend: () => { const el = document.getElementById('aiIn'); aiSend(el?.value); },
+  aiQuick: (i) => aiSend(QUICK[+i][1]),
+  stravaConnect: () => { save(); location.href = strava.authUrl(); },
+  stravaCode: async () => {
+    const code = document.getElementById('stvCode').value.trim(); if (!code) return;
+    try { await strava.exchangeCode(code); await runStravaSync(); } catch (e) { state.settings.strava.error = 'Nie udało się połączyć: ' + e.message; save(); render(); }
+  },
+  stravaSync: () => runStravaSync(),
+  stravaDisconnect: () => { if (confirm('Rozłączyć Stravę? Pobrane aktywności zostaną.')) { strava.disconnect(); render(); } },
   addSet: (i) => { const it = state.active.items[+i]; const l = it.sets[it.sets.length - 1] || {}; it.sets.push({ w: l.w ?? '', r: '', done: false }); save(); render(); },
   delSet: (i) => { const it = state.active.items[+i]; if (it.sets.length > 1) it.sets.pop(); save(); render(); },
   mobDone: (j) => { const m = state.active.mob[+j]; m.done = !m.done; save(); render(); },
@@ -778,7 +1033,7 @@ const actions = {
       durationMin: Math.round((Date.now() - A.startedAt) / 60000), rpe: +ui.form.rpe || null, notes: A.notes, finishedAt: Date.now(),
       addon: A.addon?.done ? A.addon.type : null,
       mobDone: A.mob.filter((m) => m.done).length,
-      exercises: A.items.map((it) => ({ name: it.name, equip: it.equip, unit: it.unit, muscles: it.muscles, sets: it.sets.filter((x) => x.done || +x.r > 0).map((x) => ({ w: num(x.w), r: num(x.r) || 0 })) })).filter((e) => e.sets.length),
+      exercises: A.items.map((it) => ({ name: it.name, equip: it.equip, unit: it.unit, muscles: it.muscles, sets: it.sets.filter((x) => x.done || +x.r > 0).map((x) => ({ w: num(x.w), r: num(x.r) || 0, ...(x.rir != null ? { rir: x.rir } : {}) })) })).filter((e) => e.sets.length),
     };
     state.sessions.push(s);
     if (A.slotId) { const p = state.plan.find((x) => x.id === A.slotId); if (p) { p.status = 'done'; p.doneRef = s.id; } }
@@ -836,7 +1091,7 @@ const actions = {
   applySug: (i) => { const s = planSuggestions()[+i]; applySuggestion(s); save(); openSheet('msg', { title: 'Zastosowano', text: s.title }); },
 
   exportData: async () => {
-    const blob = new Blob([JSON.stringify(state, null, 1)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify(exportable(), null, 1)], { type: 'application/json' });
     const name = `hybryda-backup-${today()}.json`;
     const file = new File([blob], name, { type: 'application/json' });
     try { if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; } } catch (e) { if (e.name === 'AbortError') return; }
@@ -871,22 +1126,31 @@ app.addEventListener('input', (ev) => {
   if (k === 'hrRest') { state.settings.hrRest = num(el.value); save(); return; }
   if (k === 'vdot') { state.settings.vdotOverride = num(el.value); save(); return; }
   if (k === 'bodyW') { state.settings.bodyWeight = num(el.value); save(); return; }
+  if (k === 'stvId' || k === 'stvSecret') { state.settings.strava[k === 'stvId' ? 'clientId' : 'clientSecret'] = el.value.trim(); save(); const b = document.querySelector('[data-a=stravaConnect]'); if (b) b.disabled = !(state.settings.strava.clientId && state.settings.strava.clientSecret); return; }
 });
 app.addEventListener('change', async (ev) => {
   const el = ev.target;
   if (el.id === 'fileIn' && el.files.length) { await handleFiles([...el.files]); el.value = ''; return; }
   if (el.id === 'backupIn' && el.files[0]) {
-    try { const data = JSON.parse(await el.files[0].text()); if (!data.templates) throw new Error('Nieprawidłowy plik'); if (confirm('Zastąpić obecne dane kopią?')) { replaceState(data); render(); } } catch (e) { alert('Błąd: ' + e.message); }
+    try { const data = JSON.parse(await el.files[0].text()); if (!data.templates) throw new Error('Nieprawidłowy plik'); if (confirm('Zastąpić obecne dane kopią?')) { importBackup(data); render(); } } catch (e) { alert('Błąd: ' + e.message); }
     el.value = ''; return;
   }
   const k = el.dataset.in;
   if (k === 'progEx') { ui.progEx = el.value; render(); }
+  if (k === 'aiModel') { state.settings.aiModel = el.value; save(); render(); }
   if (k === 'tplKind') { tpl(ui.editTpl).kind = el.value; save(); render(); }
   if (k === 'hrAuto') { state.settings.hrMaxAuto = el.checked; autoHrMax(); save(); render(); }
   if (k === 'sound') { state.settings.sound = el.checked; save(); }
   if (k === 'goalDate' || k === 'goalTime') { state.goal.set = true; save(); render(); }
 });
 
+if (/[?&]strava=ok/.test(location.search)) {
+  history.replaceState(null, '', location.pathname);
+  ui.tab = 'run';
+  setTimeout(() => runStravaSync(), 50);
+} else if (strava.connected() && Date.now() - (state.settings.strava.lastSync || 0) > 30 * 60000) {
+  setTimeout(() => runStravaSync(true), 1500);
+}
 render();
 if (state.active) keepAwake();
 requestPersist();

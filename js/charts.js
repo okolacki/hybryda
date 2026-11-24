@@ -25,7 +25,7 @@ export function bars(data, { h = 140, color = 'var(--run)', fmt = (v) => Math.ro
       out += `<rect x="${x}" y="${8 + h - bh}" width="${w}" height="${Math.max(bh, d.v ? 2 : 0)}" rx="3" fill="${color}" opacity="${last ? 1 : 0.7}"/>`;
       if (d.v && data.length <= 14) out += `<text x="${x + w / 2}" y="${8 + h - bh - 4}" class="val" text-anchor="middle">${fmt(d.v)}</text>`;
     }
-    if (data.length <= 14 || i % 2 === 0) out += `<text x="${x + w / 2}" y="${h + 24}" class="axis" text-anchor="middle">${esc(d.label)}</text>`;
+    if (data.length <= 8 || i % 2 === (data.length - 1) % 2) out += `<text x="${x + w / 2}" y="${h + 24}" class="axis" text-anchor="middle">${esc(d.label)}</text>`;
   });
   return out + '</svg>';
 }
