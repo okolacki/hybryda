@@ -4,6 +4,7 @@ import { today, weekStart, addDays, fmtPace, fmtDur, fmtNum, esc } from './util.
 import { GOALS, FOCUS, weekSummary, history, tips, assignWeek, CAT_LABEL } from './engine.js';
 import { estimateVdot, paces, isRun, classify, RUN_TYPES, runPace, hrMax, weeklyKm, predict } from './running.js';
 import { weekReport, reportText } from './report.js';
+import { declarations } from './actions.js';
 
 const BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -35,6 +36,7 @@ export function buildContext() {
     `${r.date.slice(0, 10)} ${r.type === 'Running' ? '' : r.type + ' '}${RUN_TYPES[classify(r)].label}: ${fmtNum(r.distKm, 2)} km, ${fmtDur(r.timeSec)}${isRun(r) ? ', ' + fmtPace(runPace(r)) + '/km' : ''}${r.avgHr ? ', HR ' + r.avgHr + (r.maxHr ? '/' + r.maxHr : '') : ''}${r.cadence ? ', kadencja ' + r.cadence : ''} "${r.title || ''}"`);
   return {
     dzis: today(),
+    profil_uzytkownika: { opis: state.memory.profile || null, zapamietane_fakty: state.memory.facts.map((f) => `${f.text} (${f.at})`) },
     cel: { typ: GOALS[g.type]?.label, opis: GOALS[g.type]?.desc, dystans: FOCUS[g.runFocus], docelowy_czas: g.targetTime || null, data_startu: g.targetDate || null, notatka: g.note || null, tydzien_idealny: GOALS[g.type]?.targets },
     profil: { hrMax: hrMax(), hrSpoczynkowe: s.hrRest, masa_ciala: s.bodyWeight || state.bodyweight.slice(-1)[0]?.kg || null, deload_do: s.deloadUntil },
     bieganie: est.vdot ? {
@@ -44,7 +46,7 @@ export function buildContext() {
       km_tygodniowo_12tyg: weeklyKm(12).map((w) => `${w.ws}: ${fmtNum(w.km)}`),
       ostatnie_aktywnosci: runs,
     } : 'brak danych biegowych',
-    plan_silowy: state.templates.map((t) => ({ nazwa: t.name, typ: t.kind, opis: t.desc, cwiczenia: t.exercises.map((e) => `${e.name}: ${e.sets}×${e.repMin}-${e.repMax}${e.ss ? ' [' + e.ss + ']' : ''} (priorytet ${e.prio})`), mobilnosc: t.mobility.map((m) => `${m.name} ${m.dose}`) })),
+    plan_silowy: state.templates.map((t) => ({ id: t.id, nazwa: t.name, typ: t.kind, opis: t.desc, cwiczenia: t.exercises.map((e) => `${e.name}: ${e.sets}×${e.repMin}-${e.repMax}${e.ss ? ' [' + e.ss + ']' : ''} (priorytet ${e.prio})`), mobilnosc: t.mobility.map((m) => `${m.name} ${m.dose}`) })),
     historia_silowa_ostatnie_4_sesje: strength,
     biezacy_tydzien: {
       wykonane: Object.fromEntries(Object.entries(weekSummary(ws).counts).map(([k, v]) => [CAT_LABEL[k] || k, v])),
@@ -85,6 +87,13 @@ ZASADY RZETELNOŚCI (najważniejsze):
 4. Tempa biegowe tylko z bieganie.tempa (VDOT). Ciężary planuj od ostatnich serii z historia_silowa (podwójna progresja, skok jak w planie).
 5. Użytkownik trenuje nieregularnie (2–5 jednostek/tydz.) – proponuj priorytety i warianty zamiast sztywnych dni.
 6. Medycyna: nie diagnozuj; przy bólu zaproponuj modyfikację i fizjoterapeutę.
+7. Uwzględniaj profil_uzytkownika (kontuzje, sprzęt, preferencje) – ma pierwszeństwo przed ogólnymi zaleceniami.
+
+NARZĘDZIA (funkcje aplikacji):
+- Gdy rekomendujesz KONKRETNĄ zmianę planu siłowego, zaplanowanie treningu, zmianę celu lub deload – wywołaj odpowiednią funkcję. To tylko propozycja: użytkownik zobaczy kartę „Zastosuj/Odrzuć”, więc nie pytaj o zgodę wcześniej.
+- Zawsze napisz też krótko tekstem, co proponujesz i dlaczego. Maks. 6 wywołań w jednej odpowiedzi. Nie wywołuj funkcji przy pytaniach czysto informacyjnych.
+- Nazwy szablonów i ćwiczeń kopiuj dokładnie z plan_silowy (id: UA, UB, LM, MOB…). Daty w formacie YYYY-MM-DD, tylko dziś lub później.
+- Gdy użytkownik poda trwały fakt o sobie (kontuzja, sprzęt, dostępność, preferencja) – wywołaj remember.
 
 ${KNOWLEDGE}
 
@@ -139,7 +148,9 @@ async function askModel(model, sys, messages, onDelta, signal, grounded, key) {
     // Gemini 3+/4: domyślna temperatura (zalecana przez Google); jakość podnosi tryb myślenia
     generationConfig: { maxOutputTokens: 16384, thinkingConfig: { thinkingLevel: THINKING[model] || 'high' } },
   };
-  if (grounded) body.tools = [{ google_search: {} }];
+  body.tools = [{ functionDeclarations: declarations() }];
+  if (grounded) body.tools.push({ google_search: {} });
+  body.toolConfig = { functionCallingConfig: { mode: 'AUTO' } };
   let res = await post(model, body, signal, key);
   if (!res.ok) {
     let msg = await errText(res);
@@ -157,12 +168,15 @@ async function askModel(model, sys, messages, onDelta, signal, grounded, key) {
 async function readStream(res, onDelta) {
   let text = '';
   const sources = new Map();
+  const calls = [];
   const handle = (line) => {
     const j = parseLine(line);
     if (!j) return;
     if (j.error) { const e = new Error(j.error.message || 'Błąd strumienia'); e.status = j.error.code; e.partial = !!text; throw e; }
     const c = j.candidates?.[0];
-    text += (c?.content?.parts || []).filter((p) => !p.thought).map((p) => p.text || '').join('');
+    const parts = c?.content?.parts || [];
+    text += parts.filter((p) => !p.thought).map((p) => p.text || '').join('');
+    for (const p of parts) if (p.functionCall?.name) calls.push({ name: p.functionCall.name, args: p.functionCall.args || {} });
     for (const ch of c?.groundingMetadata?.groundingChunks || []) if (ch.web?.uri) sources.set(ch.web.uri, ch.web.title || ch.web.uri);
     onDelta(text);
   };
@@ -183,8 +197,8 @@ async function readStream(res, onDelta) {
     }
     if (buf.trim().startsWith('data:')) handle(buf.trim());
   }
-  if (!text) { const e = new Error('Pusta odpowiedź modelu (blokada treści lub limit)'); e.status = 503; throw e; }
-  return { text, sources: [...sources].map(([uri, title]) => ({ uri, title })) };
+  if (!text && !calls.length) { const e = new Error('Pusta odpowiedź modelu (blokada treści lub limit)'); e.status = 503; throw e; }
+  return { text: text || 'Proponuję poniższe zmiany:', calls, sources: [...sources].map(([uri, title]) => ({ uri, title })) };
 }
 function parseLine(line) { try { return JSON.parse(line.slice(5)); } catch (e) { return null; } }
 

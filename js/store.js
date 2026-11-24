@@ -94,6 +94,7 @@ export function defaultState() {
     bodyweight: [], // {date, kg}
     active: null,   // trwający trening
     chat: [],       // rozmowa z asystentem AI
+    memory: { profile: '', facts: [] }, // co asystent wie o użytkowniku
   };
 }
 
@@ -112,6 +113,7 @@ function migrate(s) {
   s.goal = { ...d.goal, ...s.goal };
   s.settings = { ...d.settings, ...s.settings };
   s.settings.strava = { ...d.settings.strava, ...(s.settings.strava || {}) };
+  s.memory = { profile: '', facts: [], ...(s.memory || {}) };
   if (!s.settings.aiModel || /gemini-(1|2)\./.test(s.settings.aiModel)) s.settings.aiModel = 'gemini-4-hydrogen';
   return s;
 }

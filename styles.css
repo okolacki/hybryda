@@ -270,3 +270,18 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
 .bubble .meta { margin-top: 8px; font-size: 11.5px; color: var(--fa); }
 .bubble .srcs { margin-top: 8px; font-size: 12.5px; color: var(--mu); }
 .bubble .srcs a { color: var(--accent); }
+
+/* v4: akcje asystenta, pamięć */
+.acts { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.act { display: flex; gap: 10px; align-items: center; padding: 10px; border-radius: 12px; background: var(--s2); border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.act b { display: block; font-size: 14px; font-weight: 600; line-height: 1.35; }
+.act small { font-size: 11.5px; }
+.act.applied { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
+.act.rejected, .act.invalid { opacity: .55; border-color: var(--line); }
+.act.error { border-color: rgba(255, 93, 93, .4); }
+.act .col { gap: 6px; }
+.actst { font-size: 12px; font-weight: 700; color: var(--good); white-space: nowrap; }
+.act.rejected .actst { color: var(--mu); } .act.error .actst { color: var(--bad); }
+button.tip { width: 100%; text-align: left; }
+.fact { display: flex; gap: 8px; align-items: center; padding: 8px 10px; background: var(--s2); border-radius: 10px; font-size: 14px; }
+.fact small { display: inline; color: var(--fa); }

@@ -5,6 +5,7 @@ import { upcomingEvents, buildICS } from './ics.js';
 import { weekReport } from './report.js';
 import { ask, listModels, md, QUICK, MODEL_CHAIN, MODEL_INFO, chain } from './ai.js';
 import * as strava from './strava.js';
+import { describe as describeAct, apply as applyAct, addFact } from './actions.js';
 import { importCSV, importFIT, vdotFrom, estimateVdot, paces, predict, runStats, weeklyKm, efficiencySeries, classify, RUN_TYPES, isRun, runPace, hrZones, zoneTimes, buildRun, addManualRun, hrMax, autoHrMax } from './running.js';
 import { bars, line } from './charts.js';
 
@@ -537,9 +538,10 @@ function viewCoach() {
   }
   const chat = state.chat;
   return `<header class="top"><div><div class="eyebrow">${esc(chain().join(' → '))}</div><h1>Asystent</h1></div>
-    <button class="iconbtn" data-a="aiSettings" aria-label="Ustawienia asystenta">${ic('dots')}</button></header>
+    <div class="row gap"><button class="btn sm ghost" data-a="aiMemory">Profil${state.memory.facts.length ? ' · ' + state.memory.facts.length : ''}</button><button class="iconbtn" data-a="aiSettings" aria-label="Ustawienia asystenta">${ic('dots')}</button></div></header>
+  ${!state.memory.profile && !state.memory.facts.length ? `<button class="tip info" data-a="aiMemory"><div><b>Uzupełnij profil dla asystenta</b><p>Kontuzje, sprzęt na siłowni, ile realnie masz czasu, preferencje – asystent będzie to brał pod uwagę w każdej odpowiedzi.</p></div></button>` : ''}
   ${chat.length ? '' : `<div class="hint">Asystent widzi Twój cel, plan, historię serii, biegi, VDOT i bieżący tydzień. Zapytaj o cokolwiek albo zacznij od gotowego pytania.</div>`}
-  <div class="chat">${chat.map((m) => `<div class="bubble ${m.role === 'user' ? 'me' : 'ai'} ${m.err ? 'err' : ''}" ${m.pending ? 'id="aiStream"' : ''}>${m.role === 'user' ? esc(m.text).replace(/\n/g, '<br>') : m.pending && !m.text ? '<span class="typing"><i></i><i></i><i></i></span>' : md(m.text)}${m.sources?.length ? `<div class="srcs"><b>Źródła:</b> ${m.sources.slice(0, 5).map((x) => `<a href="${esc(x.uri)}" target="_blank" rel="noopener">${esc(x.title)}</a>`).join(' · ')}</div>` : ''}${m.role !== 'user' && !m.pending && m.model ? `<div class="meta">${esc(m.model)}${m.note ? ' · ' + esc(m.note) : ''}</div>` : ''}</div>`).join('')}</div>
+  <div class="chat">${chat.map((m) => `<div class="bubble ${m.role === 'user' ? 'me' : 'ai'} ${m.err ? 'err' : ''}" ${m.pending ? 'id="aiStream"' : ''}>${m.role === 'user' ? esc(m.text).replace(/\n/g, '<br>') : m.pending && !m.text ? '<span class="typing"><i></i><i></i><i></i></span>' : md(m.text)}${m.sources?.length ? `<div class="srcs"><b>Źródła:</b> ${m.sources.slice(0, 5).map((x) => `<a href="${esc(x.uri)}" target="_blank" rel="noopener">${esc(x.title)}</a>`).join(' · ')}</div>` : ''}${m.actions?.length ? actionCards(m) : ''}${m.role !== 'user' && !m.pending && m.model ? `<div class="meta">${esc(m.model)}${m.note ? ' · ' + esc(m.note) : ''}</div>` : ''}</div>`).join('')}</div>
   <div class="quick">${QUICK.map(([l], i) => `<button class="chipbtn" data-a="aiQuick" data-v="${i}" ${ui.aiBusy ? 'disabled' : ''}>${l}</button>`).join('')}</div>
   <div class="composer"><textarea id="aiIn" rows="2" placeholder="Zapytaj trenera…" ${ui.aiBusy ? 'disabled' : ''}></textarea>
     <button class="iconbtn send" data-a="aiSend" ${ui.aiBusy ? 'disabled' : ''} aria-label="Wyślij">${ic('send')}</button></div>`;
@@ -562,6 +564,7 @@ async function aiSend(text) {
       if (el) { el.innerHTML = md(t); scrollChat(); }
     });
     reply.text = out.text; reply.model = out.model; reply.note = out.note || ''; reply.sources = out.sources || [];
+    reply.actions = (out.calls || []).slice(0, 8).map((c) => ({ id: uid(), name: c.name, args: c.args, status: 'pending' }));
   } catch (e) {
     reply.text = '⚠️ ' + (e.message || e); reply.err = true;
     state.chat[state.chat.length - 2].err = true;
@@ -570,6 +573,24 @@ async function aiSend(text) {
   if (state.chat.length > 40) state.chat = state.chat.slice(-40);
   save(); render(); scrollChat();
 }
+function actionCards(m) {
+  const pending = m.actions.filter((a) => a.status === 'pending' && describeAct(a).ok).length;
+  const label = { pending: '', applied: '✓ Zastosowano', rejected: 'Odrzucono', error: 'Błąd' };
+  return `<div class="acts">${m.actions.map((a) => {
+    const d = describeAct(a);
+    const st = a.status;
+    return `<div class="act ${st} ${d.ok ? '' : 'invalid'}"><div class="grow"><small>${ACT_LABEL[a.name] || a.name}</small><b>${esc(st === 'pending' ? d.text : a.summary || d.text)}</b>${a.error ? `<small class="bad">${esc(a.error)}</small>` : ''}</div>
+      ${st === 'pending' ? (d.ok ? `<div class="col"><button class="btn sm primary" data-a="actApply" data-v="${a.id}">Zastosuj</button><button class="btn sm ghost" data-a="actReject" data-v="${a.id}">Odrzuć</button></div>` : `<button class="btn sm ghost" data-a="actReject" data-v="${a.id}">Ukryj</button>`) : `<span class="actst">${label[st]}</span>`}</div>`;
+  }).join('')}${pending > 1 ? `<button class="btn sm primary" data-a="actApplyAll" data-v="${m.actions[0].id}">Zastosuj wszystkie (${pending})</button>` : ''}</div>`;
+}
+const ACT_LABEL = { update_exercise: 'Zmiana ćwiczenia', add_exercise: 'Nowe ćwiczenie', remove_exercise: 'Usunięcie ćwiczenia', plan_session: 'Nowy slot', set_goal: 'Cel', set_deload: 'Deload', remember: 'Pamięć asystenta' };
+function findAct(id) { for (const m of state.chat) for (const a of m.actions || []) if (a.id === id) return a; return null; }
+function runAct(a) {
+  if (a.status !== 'pending') return;
+  const d = describeAct(a);
+  try { applyAct(a); a.status = 'applied'; a.summary = d.text; } catch (e) { a.status = 'error'; a.error = e.message; }
+}
+
 function scrollChat() { requestAnimationFrame(() => window.scrollTo(0, document.body.scrollHeight)); }
 
 async function runStravaSync(silent = false) {
@@ -769,6 +790,15 @@ function renderSheet() {
       ${ev.length ? `<div class="evlist">${ev.map((e) => `<div><b>${fmtDate(e.date)} ${e.time}</b><span>${esc(e.title)}</span></div>`).join('')}</div>` : '<div class="empty">Brak przyszłych slotów w tym zakresie – zaplanuj je w widoku tygodnia.</div>'}
       ${ev.length ? `<button class="btn primary" data-a="icsOpen">Dodaj do Kalendarza</button><button class="btn ghost" data-a="icsShare">Udostępnij / zapisz plik .ics</button>
       <p class="muted small">Ponowny eksport tych samych slotów może utworzyć duplikaty – po większych zmianach usuń stare wydarzenia.</p>` : ''}`;
+  }
+  if (S.type === 'aiMemory') {
+    return `${head('Profil dla asystenta')}
+      <p class="muted small">Asystent dostaje to przy każdym pytaniu. Pisz konkretnie: kontuzje i ograniczenia, sprzęt na siłowni, realna dostępność, preferencje, cele poboczne.</p>
+      <label class="field"><span>O mnie</span><textarea data-f="profile" rows="5" placeholder="np. 28 lat, 180 cm. Prawy bark wrażliwy przy dipsach. Siłownia ma bramę, hantle do 40 kg, brak maszyny Smitha. Biegam rano przed pracą, max 60 min w tygodniu.">${esc(F.profile || '')}</textarea></label>
+      <div class="field"><span>Zapamiętane fakty (${state.memory.facts.length})</span>
+        ${state.memory.facts.map((f) => `<div class="fact"><span class="grow">${esc(f.text)} <small>${f.at}</small></span><button class="iconbtn sm faint" data-a="memDel" data-v="${f.id}" aria-label="Usuń">${ic('x')}</button></div>`).join('') || '<span class="muted small">Asystent zaproponuje fakty do zapamiętania, gdy o nich wspomnisz.</span>'}
+        <div class="row gap"><input class="grow txt" data-f="fact" value="${esc(F.fact || '')}" placeholder="Dodaj fakt…"><button class="btn sm" data-a="memAdd">Dodaj</button></div></div>
+      <button class="btn primary" data-a="memSave">Zapisz</button>`;
   }
   if (S.type === 'aiSettings') {
     const avail = ui.models ? new Set(ui.models.map((m) => m.id)) : null;
@@ -990,6 +1020,13 @@ const actions = {
   },
   aiClear: () => { if (confirm('Wyczyścić rozmowę?')) { state.chat = []; save(); closeSheet(); } },
   aiRemoveKey: () => { if (confirm('Usunąć klucz API z tego urządzenia?')) { state.settings.aiKey = ''; ui.models = null; save(); closeSheet(); } },
+  actApply: (id) => { const a = findAct(id); if (a) { runAct(a); save(); render(); } },
+  actReject: (id) => { const a = findAct(id); if (a) { a.status = 'rejected'; save(); render(); } },
+  actApplyAll: (id) => { const m = state.chat.find((x) => (x.actions || []).some((a) => a.id === id)); (m?.actions || []).filter((a) => a.status === 'pending' && describeAct(a).ok).forEach(runAct); save(); render(); },
+  aiMemory: () => openSheet('aiMemory', {}, { profile: state.memory.profile, fact: '' }),
+  memSave: () => { state.memory.profile = (ui.form.profile || '').trim(); if ((ui.form.fact || '').trim()) addFact(ui.form.fact); save(); closeSheet(); },
+  memAdd: () => { if ((ui.form.fact || '').trim()) { state.memory.profile = (ui.form.profile ?? state.memory.profile).trim(); addFact(ui.form.fact); ui.form.fact = ''; save(); render(); } },
+  memDel: (id) => { state.memory.facts = state.memory.facts.filter((f) => f.id !== id); save(); render(); },
   aiSend: () => { const el = document.getElementById('aiIn'); aiSend(el?.value); },
   aiQuick: (i) => aiSend(QUICK[+i][1]),
   stravaConnect: () => { save(); location.href = strava.authUrl(); },
