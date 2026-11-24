@@ -1,0 +1,26 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "pulsing-dot",
+        "value": "*",
+        "files": [
+          "index.html"
+        ],
+        "createdAt": "2026-11-24T01:35:38.156Z",
+        "reason": "Claude triage: the only animated dots are the AI chat typing indicator (.typing), shown only while a live Gemini response is streaming"
+      },
+      {
+        "rule": "pulsing-dot",
+        "value": "*",
+        "files": [
+          "strava.html"
+        ],
+        "createdAt": "2026-11-24T01:35:38.360Z",
+        "reason": "Claude triage: the only animated dots are the AI chat typing indicator (.typing), shown only while a live Gemini response is streaming"
+      }
+    ]
+  }
+}

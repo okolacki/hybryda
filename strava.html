@@ -9,13 +9,13 @@
 </head>
 <body>
   <main class="main" id="box">
-    <header class="top"><div><div class="eyebrow">Strava</div><h1>Łączenie konta…</h1></div></header>
+    <header class="top"><h1>Strava: łączenie konta…</h1></header>
   </main>
   <script type="module">
     const box = document.getElementById('box');
     const q = new URLSearchParams(location.search);
     const code = q.get('code'), err = q.get('error');
-    const show = (title, html) => { box.innerHTML = `<header class="top"><div><div class="eyebrow">Strava</div><h1>${title}</h1></div></header>${html}`; };
+    const show = (title, html) => { box.innerHTML = `<header class="top"><h1>Strava: ${title.toLowerCase()}</h1></header>${html}`; };
     if (err || !code) {
       show('Nie połączono', `<div class="card"><p>Strava zwróciła: ${err || 'brak kodu'}. Wróć do aplikacji i spróbuj ponownie.</p><a class="btn primary" href="./">Wróć do aplikacji</a></div>`);
     } else {
