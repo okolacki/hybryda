@@ -3,7 +3,7 @@ import { uid, esc, today, weekStart, weekDays, addDays, isoWeek, fmtDate, fmtDat
 import { GOALS, FOCUS, CAT_LABEL, assignWeek, weekSummary, buildWorkout, candidates, candByKey, fitTemplate, prescribe, history, e1rm, prsInSession, muscleSets, tips, planSuggestions, applySuggestion, bodyWeight, warmups, plates, alternatives } from './engine.js';
 import { upcomingEvents, buildICS } from './ics.js';
 import { weekReport } from './report.js';
-import { ask, listModels, md, QUICK } from './ai.js';
+import { ask, listModels, md, QUICK, MODEL_CHAIN, MODEL_INFO, chain } from './ai.js';
 import * as strava from './strava.js';
 import { importCSV, importFIT, vdotFrom, estimateVdot, paces, predict, runStats, weeklyKm, efficiencySeries, classify, RUN_TYPES, isRun, runPace, hrZones, zoneTimes, buildRun, addManualRun, hrMax, autoHrMax } from './running.js';
 import { bars, line } from './charts.js';
@@ -536,10 +536,10 @@ function viewCoach() {
     </ul></section>`;
   }
   const chat = state.chat;
-  return `<header class="top"><div><div class="eyebrow">Gemini · ${esc(state.settings.aiModel)}</div><h1>Asystent</h1></div>
+  return `<header class="top"><div><div class="eyebrow">${esc(chain().join(' → '))}</div><h1>Asystent</h1></div>
     <button class="iconbtn" data-a="aiSettings" aria-label="Ustawienia asystenta">${ic('dots')}</button></header>
   ${chat.length ? '' : `<div class="hint">Asystent widzi Twój cel, plan, historię serii, biegi, VDOT i bieżący tydzień. Zapytaj o cokolwiek albo zacznij od gotowego pytania.</div>`}
-  <div class="chat">${chat.map((m) => `<div class="bubble ${m.role === 'user' ? 'me' : 'ai'} ${m.err ? 'err' : ''}" ${m.pending ? 'id="aiStream"' : ''}>${m.role === 'user' ? esc(m.text).replace(/\n/g, '<br>') : m.pending && !m.text ? '<span class="typing"><i></i><i></i><i></i></span>' : md(m.text)}</div>`).join('')}</div>
+  <div class="chat">${chat.map((m) => `<div class="bubble ${m.role === 'user' ? 'me' : 'ai'} ${m.err ? 'err' : ''}" ${m.pending ? 'id="aiStream"' : ''}>${m.role === 'user' ? esc(m.text).replace(/\n/g, '<br>') : m.pending && !m.text ? '<span class="typing"><i></i><i></i><i></i></span>' : md(m.text)}${m.sources?.length ? `<div class="srcs"><b>Źródła:</b> ${m.sources.slice(0, 5).map((x) => `<a href="${esc(x.uri)}" target="_blank" rel="noopener">${esc(x.title)}</a>`).join(' · ')}</div>` : ''}${m.role !== 'user' && !m.pending && m.model ? `<div class="meta">${esc(m.model)}${m.note ? ' · ' + esc(m.note) : ''}</div>` : ''}</div>`).join('')}</div>
   <div class="quick">${QUICK.map(([l], i) => `<button class="chipbtn" data-a="aiQuick" data-v="${i}" ${ui.aiBusy ? 'disabled' : ''}>${l}</button>`).join('')}</div>
   <div class="composer"><textarea id="aiIn" rows="2" placeholder="Zapytaj trenera…" ${ui.aiBusy ? 'disabled' : ''}></textarea>
     <button class="iconbtn send" data-a="aiSend" ${ui.aiBusy ? 'disabled' : ''} aria-label="Wyślij">${ic('send')}</button></div>`;
@@ -556,11 +556,12 @@ async function aiSend(text) {
   ui.aiBusy = true; ui.tab = 'coach'; ui.sheet = null;
   render(); scrollChat();
   try {
-    reply.text = await ask([...past, { role: 'user', text }], (t) => {
+    const out = await ask([...past, { role: 'user', text }], (t) => {
       reply.text = t;
       const el = document.getElementById('aiStream');
       if (el) { el.innerHTML = md(t); scrollChat(); }
     });
+    reply.text = out.text; reply.model = out.model; reply.note = out.note || ''; reply.sources = out.sources || [];
   } catch (e) {
     reply.text = '⚠️ ' + (e.message || e); reply.err = true;
     state.chat[state.chat.length - 2].err = true;
@@ -770,10 +771,15 @@ function renderSheet() {
       <p class="muted small">Ponowny eksport tych samych slotów może utworzyć duplikaty – po większych zmianach usuń stare wydarzenia.</p>` : ''}`;
   }
   if (S.type === 'aiSettings') {
+    const avail = ui.models ? new Set(ui.models.map((m) => m.id)) : null;
     return `${head('Ustawienia asystenta')}
-      <label class="field"><span>Model Gemini</span><select data-in="aiModel">${(ui.models || [{ id: state.settings.aiModel, label: state.settings.aiModel }]).map((m) => `<option value="${esc(m.id)}" ${m.id === state.settings.aiModel ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</select></label>
-      ${ui.models ? '' : '<p class="muted small">Ładuję listę modeli…</p>'}
-      <p class="muted small">„Flash” – szybki, wysokie limity w darmowym planie (dobry na co dzień). „Pro” – dokładniejsze analizy, niższe limity.</p>
+      <div class="field"><span>Model główny (drugi z listy jest automatycznym zapasem)</span>
+      ${MODEL_CHAIN.map((id) => `<label class="radio ${state.settings.aiModel === id ? 'on' : ''}"><input type="radio" name="aim" data-in="aiModel" value="${id}" ${state.settings.aiModel === id ? 'checked' : ''}>
+        <div><b>${id}</b><small>${MODEL_INFO[id]}${avail ? (avail.has(id) ? ' · dostępny na Twoim kluczu' : ' · <span class="bad">brak na liście Twojego klucza</span>') : ''}</small></div></label>`).join('')}
+      ${ui.models ? '' : '<p class="muted small">Sprawdzam dostępność modeli…</p>'}</div>
+      <p class="muted small">Gdy główny model zwróci limit, przeciążenie lub będzie niedostępny, odpowiedź automatycznie przejmie zapasowy – pod odpowiedzią widać, który odpowiedział.</p>
+      <label class="toggle"><input type="checkbox" data-in="aiGround" ${state.settings.aiGrounding ? 'checked' : ''}> Weryfikuj odpowiedzi w Google Search (ze źródłami)</label>
+      <p class="muted small">Działa tylko na <b>płatnym</b> kluczu API (z podpiętym billingiem lub kredytami z Google AI Pro). Na darmowym kluczu aplikacja sama pominie weryfikację.</p>
       <div class="row gap wrap"><button class="btn" data-a="aiClear">Wyczyść rozmowę</button><button class="btn danger" data-a="aiRemoveKey">Usuń klucz API</button></div>`;
   }
   if (S.type === 'msg') return `${head(esc(S.title))}<p>${esc(S.text)}</p><button class="btn primary" data-a="closeSheet">OK</button>`;
@@ -969,7 +975,8 @@ const actions = {
       const models = await listModels(key);
       ui.models = models;
       state.settings.aiKey = key;
-      if (!models.some((m) => m.id === state.settings.aiModel)) state.settings.aiModel = (models.find((m) => /flash/.test(m.id) && !/lite|preview|exp/.test(m.id)) || models[0])?.id || state.settings.aiModel;
+      state.settings.aiModel = MODEL_CHAIN.find((id) => models.some((m) => m.id === id)) || MODEL_CHAIN[0];
+      ui.aiWarn = MODEL_CHAIN.filter((id) => !models.some((m) => m.id === id)).join(', ');
       save();
     } catch (e) { ui.aiErr = 'Klucz nie działa: ' + e.message; }
     render();
@@ -1138,6 +1145,7 @@ app.addEventListener('change', async (ev) => {
   const k = el.dataset.in;
   if (k === 'progEx') { ui.progEx = el.value; render(); }
   if (k === 'aiModel') { state.settings.aiModel = el.value; save(); render(); }
+  if (k === 'aiGround') { state.settings.aiGrounding = el.checked; save(); }
   if (k === 'tplKind') { tpl(ui.editTpl).kind = el.value; save(); render(); }
   if (k === 'hrAuto') { state.settings.hrMaxAuto = el.checked; autoHrMax(); save(); render(); }
   if (k === 'sound') { state.settings.sound = el.checked; save(); }

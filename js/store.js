@@ -86,7 +86,7 @@ export function defaultState() {
     v: 1,
     goal: { type: 'hybrid', runFocus: '10k', targetTime: '', targetDate: '', note: '', set: false },
     settings: { hrMax: null, hrMaxAuto: true, hrRest: 55, vdotOverride: null, bodyWeight: null, deloadUntil: null, sound: true, barKg: 20, slotTime: '18:00', reminder: 60,
-      aiKey: '', aiModel: 'gemini-2.5-flash', strava: { clientId: '', clientSecret: '', refresh: '', access: '', expires: 0, athlete: '', lastSync: 0, error: '' } },
+      aiKey: '', aiModel: 'gemini-4-hydrogen', aiGrounding: false, strava: { clientId: '', clientSecret: '', refresh: '', access: '', expires: 0, athlete: '', lastSync: 0, error: '' } },
     templates: defaultTemplates(),
     sessions: [],   // zalogowane treningi siłowe / mobility
     runs: [],       // biegi i cardio (CSV / FIT / ręcznie)
@@ -112,6 +112,7 @@ function migrate(s) {
   s.goal = { ...d.goal, ...s.goal };
   s.settings = { ...d.settings, ...s.settings };
   s.settings.strava = { ...d.settings.strava, ...(s.settings.strava || {}) };
+  if (!s.settings.aiModel || /gemini-(1|2)\./.test(s.settings.aiModel)) s.settings.aiModel = 'gemini-4-hydrogen';
   return s;
 }
 export function save() {

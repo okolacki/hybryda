@@ -55,59 +55,139 @@ export function buildContext() {
   };
 }
 
-function systemPrompt() {
-  return `Jesteś doświadczonym trenerem przygotowania hybrydowego (siłownia + bieganie) i osobistym asystentem w aplikacji „Hybryda”.
-Odpowiadasz po polsku, konkretnie i praktycznie: podawaj liczby (tempa /km, tętno, ciężary, serie×powtórzenia, minuty). Opieraj się na danych użytkownika poniżej – cytuj je, gdy uzasadniasz rekomendację.
-Zasady: progresja stopniowa (kilometraż max ~10–15%/tydz.), 80/20 w bieganiu, 48 h między ciężkimi bodźcami na tę samą partię, priorytet celu użytkownika. Użytkownik trenuje nieregularnie (2–5 jednostek/tydz.) – proponuj plany odporne na to (priorytety zamiast sztywnych dni).
-Tempa biegowe bierz z pola bieganie.tempa (model VDOT Danielsa). Przy bólu/kontuzji nie diagnozuj – zasugeruj modyfikację i konsultację z fizjoterapeutą.
-Formatowanie: krótkie akapity, listy punktowane, ewentualnie prosta tabela Markdown. Bez zbędnych wstępów.
+// Kolejność modeli: główny + zapasowy (ID potwierdzone w dokumentacji Gemini API, listopad 2026)
+export const MODEL_CHAIN = ['gemini-4-hydrogen', 'gemini-3.8-flash'];
+const THINKING = { 'gemini-4-hydrogen': 'high', 'gemini-3.8-flash': 'high' };
+export const MODEL_INFO = {
+  'gemini-4-hydrogen': 'Główny – najnowszy, najlepsze rozumowanie',
+  'gemini-3.8-flash': 'Zapasowy – stabilny i szybki',
+};
+export function chain() {
+  const cur = state.settings.aiModel;
+  const first = cur && !/gemini-(1|2)\./.test(cur) ? cur : MODEL_CHAIN[0];
+  return [first, ...MODEL_CHAIN.filter((m) => m !== first)];
+}
 
-DANE UŻYTKOWNIKA (JSON):
+// Zwięzła baza wiedzy (konsensus naukowy), żeby model nie zgadywał zasad treningu
+const KNOWLEDGE = `BAZA WIEDZY (stosuj; jeśli pytanie wykracza poza nią i poza DANE – powiedz to wprost):
+Bieganie: intensywność wg VDOT Danielsa (E ok. 59–74% VO2max, M, T ok. 88%, I ok. 97–100%, R szybsze od I). Ok. 80% czasu w Z1–Z2, akcenty 1–2/tydz. przy < 40 km/tydz. Długi bieg ≤ ok. 30% tygodniowego kilometrażu. Wzrost objętości ok. 10%/tydz., co 3–4 tyg. tydzień lżejszy. ACWR 0,8–1,3 bezpieczny, > 1,5 ryzyko przeciążeń. Taper 7–14 dni: −30–50% objętości, intensywność zachowana. Kadencja: +5–10% na spokojnych biegach zmniejsza obciążenie kolan i bioder. Interwały I: odcinki 3–5 min, przerwy równe lub krótsze, łącznie ≤ ok. 8% tygodniowego kilometrażu; T łącznie ≤ ok. 10%.
+Siła / hipertrofia: 10–20 twardych serii na partię tygodniowo (minimum ok. 6–10 daje progres); 2×/tydz. na partię optymalnie, gdy możliwe; serie 0–3 RIR; zakres 5–30 powtórzeń skuteczny przy bliskości upadku; podwójna progresja; deload co 4–8 tyg. lub przy stagnacji (−30–50% objętości). Pary antagonistyczne (APS) oszczędzają czas bez utraty efektu.
+Trening równoległy: interferencja dotyczy głównie siły i mocy nóg przy dużej objętości biegowej; ciężkie nogi i akcenty biegowe rozdzielaj o 24–48 h; spokojny bieg po treningu góry nie szkodzi hipertrofii góry. Rekompozycja: białko 1,6–2,2 g/kg, umiarkowany deficyt.
+Regeneracja: sen 7–9 h. Ból ostry/kłujący, obrzęk lub ból zmieniający technikę → przerwa i fizjoterapeuta (nie diagnozuj).`;
+
+function systemPrompt() {
+  return `Jesteś trenerem przygotowania hybrydowego (siłownia + bieganie) w aplikacji „Hybryda”. Odpowiadasz po polsku.
+
+ZASADY RZETELNOŚCI (najważniejsze):
+1. Liczby o użytkowniku (ciężary, tempa, tętno, km, daty) bierz WYŁĄCZNIE z sekcji DANE. Nie wymyślaj treningów, wyników ani historii, których tam nie ma.
+2. Gdy danych brakuje (np. brak historii ćwiczenia, brak tętna) – napisz to wprost i zaproponuj, co zalogować. Lepiej „nie wiem z tych danych” niż zgadywanie.
+3. Rekomendacje uzasadniaj krótko odwołaniem do DANYCH (np. „śr. HR spokojnych biegów 155 = Z3”) albo do BAZY WIEDZY. Nie podawaj fałszywie precyzyjnych wartości ani nieistniejących badań i cytatów.
+4. Tempa biegowe tylko z bieganie.tempa (VDOT). Ciężary planuj od ostatnich serii z historia_silowa (podwójna progresja, skok jak w planie).
+5. Użytkownik trenuje nieregularnie (2–5 jednostek/tydz.) – proponuj priorytety i warianty zamiast sztywnych dni.
+6. Medycyna: nie diagnozuj; przy bólu zaproponuj modyfikację i fizjoterapeutę.
+
+${KNOWLEDGE}
+
+Formatowanie: konkretnie, krótkie akapity, listy, ewentualnie prosta tabela Markdown. Bez wstępów i powtarzania pytania.
+
+DANE (stan na ${today()}, JSON):
 ${JSON.stringify(buildContext())}`;
 }
 
-// Strumieniowa odpowiedź; onDelta(textSoFar)
+// Strumieniowa odpowiedź z automatycznym przejściem na model zapasowy.
+// onDelta(textSoFar); zwraca { text, model, note, sources }
 export async function ask(messages, onDelta, signal) {
   const key = state.settings.aiKey;
   if (!key) throw new Error('Brak klucza API – dodaj go w ustawieniach asystenta.');
-  const model = state.settings.aiModel || 'gemini-2.5-flash';
-  const body = {
-    systemInstruction: { parts: [{ text: systemPrompt() }] },
-    contents: messages.map((m) => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.text }] })),
-    generationConfig: { temperature: 0.6, maxOutputTokens: 4096 },
-  };
-  const res = await fetch(`${BASE}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body), signal,
-  });
-  if (!res.ok) throw new Error(await errText(res));
-  let text = '';
-  if (!res.body || !res.body.getReader) {
-    const raw = await res.text();
-    raw.split('\n').filter((l) => l.startsWith('data:')).forEach((l) => { text += chunkText(l); });
-    onDelta(text); return text;
-  }
-  const reader = res.body.getReader(), dec = new TextDecoder();
-  let buf = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let i;
-    while ((i = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
-      if (line.startsWith('data:')) { text += chunkText(line); onDelta(text); }
+  const sys = systemPrompt();
+  const errors = [];
+  for (const model of chain()) {
+    for (const grounded of state.settings.aiGrounding ? [true, false] : [false]) {
+      try {
+        const out = await askModel(model, sys, messages, onDelta, signal, grounded, key);
+        const note = errors.length ? `${errors.map((e) => `${e.model}: ${e.msg}`).join('; ')} → odpowiada ${model}` : '';
+        return { ...out, model, note };
+      } catch (e) {
+        if (e.name === 'AbortError' || e.partial) throw e;
+        const msg = String(e.message || e);
+        if (grounded && /ground|search|tool|free tier|not available|billing/i.test(msg)) { errors.push({ model, msg: 'weryfikacja w Google niedostępna na tym kluczu – wyłączona' }); state.settings.aiGrounding = false; continue; }
+        errors.push({ model, msg: shortErr(msg, e.status) });
+        if (e.status === 401 || /api key not valid|permission/i.test(msg)) throw new Error(msg);
+        break; // następny model w łańcuchu
+      }
     }
   }
-  if (buf.trim().startsWith('data:')) { text += chunkText(buf.trim()); onDelta(text); }
-  if (!text) throw new Error('Pusta odpowiedź modelu (możliwa blokada treści lub limit).');
-  return text;
+  throw new Error('Żaden model nie odpowiedział: ' + errors.map((e) => `${e.model} – ${e.msg}`).join('; '));
 }
-function chunkText(line) {
-  try {
-    const j = JSON.parse(line.slice(5));
-    return (j.candidates?.[0]?.content?.parts || []).filter((p) => !p.thought).map((p) => p.text || '').join('');
-  } catch (e) { return ''; }
+function shortErr(msg, status) {
+  if (status === 429 || /quota|rate/i.test(msg)) return 'limit zapytań';
+  if (status === 404 || /not found|not supported/i.test(msg)) return 'model niedostępny';
+  if (status === 503 || /overload|unavailable/i.test(msg)) return 'przeciążony';
+  return msg.slice(0, 80);
 }
+
+async function post(model, body, signal, key) {
+  return fetch(`${BASE}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body), signal,
+  });
+}
+
+async function askModel(model, sys, messages, onDelta, signal, grounded, key) {
+  const body = {
+    systemInstruction: { parts: [{ text: sys }] },
+    contents: messages.map((m) => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.text }] })),
+    // Gemini 3+/4: domyślna temperatura (zalecana przez Google); jakość podnosi tryb myślenia
+    generationConfig: { maxOutputTokens: 16384, thinkingConfig: { thinkingLevel: THINKING[model] || 'high' } },
+  };
+  if (grounded) body.tools = [{ google_search: {} }];
+  let res = await post(model, body, signal, key);
+  if (!res.ok) {
+    let msg = await errText(res);
+    if (res.status === 400 && /thinking/i.test(msg)) { // model bez obsługi thinkingLevel
+      delete body.generationConfig.thinkingConfig;
+      res = await post(model, body, signal, key);
+      if (res.ok) return readStream(res, onDelta);
+      msg = await errText(res);
+    }
+    const err = new Error(msg); err.status = res.status; throw err;
+  }
+  return readStream(res, onDelta);
+}
+
+async function readStream(res, onDelta) {
+  let text = '';
+  const sources = new Map();
+  const handle = (line) => {
+    const j = parseLine(line);
+    if (!j) return;
+    if (j.error) { const e = new Error(j.error.message || 'Błąd strumienia'); e.status = j.error.code; e.partial = !!text; throw e; }
+    const c = j.candidates?.[0];
+    text += (c?.content?.parts || []).filter((p) => !p.thought).map((p) => p.text || '').join('');
+    for (const ch of c?.groundingMetadata?.groundingChunks || []) if (ch.web?.uri) sources.set(ch.web.uri, ch.web.title || ch.web.uri);
+    onDelta(text);
+  };
+  if (!res.body || !res.body.getReader) {
+    (await res.text()).split('\n').filter((l) => l.startsWith('data:')).forEach(handle);
+  } else {
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        if (line.startsWith('data:')) handle(line);
+      }
+    }
+    if (buf.trim().startsWith('data:')) handle(buf.trim());
+  }
+  if (!text) { const e = new Error('Pusta odpowiedź modelu (blokada treści lub limit)'); e.status = 503; throw e; }
+  return { text, sources: [...sources].map(([uri, title]) => ({ uri, title })) };
+}
+function parseLine(line) { try { return JSON.parse(line.slice(5)); } catch (e) { return null; } }
+
 
 // Bezpieczny, minimalny Markdown → HTML
 export function md(src) {

@@ -1,5 +1,5 @@
 // Offline cache: network-first dla plików aplikacji (szybkie aktualizacje), fallback do cache
-const CACHE = 'hybryda-v3';
+const CACHE = 'hybryda-v4';
 const ASSETS = ['./', 'index.html', 'styles.css', 'manifest.webmanifest', 'js/app.js', 'js/store.js', 'js/util.js', 'js/engine.js', 'js/running.js', 'js/fit.js', 'js/charts.js', 'js/ics.js', 'js/report.js', 'js/ai.js', 'js/strava.js', 'strava.html', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
