@@ -1,5 +1,5 @@
 // Offline cache: network-first dla plików aplikacji (szybkie aktualizacje), fallback do cache
-const CACHE = 'hybryda-v1';
+const CACHE = 'hybryda-v2';
 const ASSETS = ['./', 'index.html', 'styles.css', 'manifest.webmanifest', 'js/app.js', 'js/store.js', 'js/util.js', 'js/engine.js', 'js/running.js', 'js/fit.js', 'js/charts.js', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
